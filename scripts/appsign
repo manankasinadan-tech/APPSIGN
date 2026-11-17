@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# APPSIGN CLI launcher for Termux and Linux
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+JAR_PATH="${APPSIGN_JAR:-$SCRIPT_DIR/../appsign-cli/build/libs/appsign-cli-all.jar}"
+
+if [ ! -f "$JAR_PATH" ]; then
+  echo "APPSIGN CLI JAR not found at: $JAR_PATH" >&2
+  echo "Build it first with: gradle :appsign-cli:fatJar" >&2
+  exit 3
+fi
+
+exec java -jar "$JAR_PATH" "$@"

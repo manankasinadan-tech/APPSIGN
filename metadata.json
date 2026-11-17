@@ -1,0 +1,6 @@
+{
+  "name": "APPSIGN",
+  "description": "Offline Android APK signature verifier, key manager (ASK format), and batch resigning suite with companion CLI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
