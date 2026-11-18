@@ -1,6 +1,7 @@
 package com.hephaistos.appsign.core.apk
 
 import com.android.apksig.ApkSigner
+import com.android.apksig.SigningCertificateLineage
 import com.hephaistos.appsign.core.ask.ApkOperationException
 import com.hephaistos.appsign.core.crypto.CryptoSupport
 import com.hephaistos.appsign.core.model.ApkResignResult
@@ -23,6 +24,7 @@ object ApkSignerEngine {
     outputApk: File,
     signers: List<UnlockedKeyMaterial>,
     options: SigningOptions = SigningOptions(),
+    useKeyRotationLineage: Boolean = false,
   ): ApkResignResult {
     if (signers.isEmpty()) {
       throw ApkOperationException("At least one signing key is required.")
@@ -72,7 +74,10 @@ object ApkSignerEngine {
             .build()
         }
 
-      val effectiveV3 = options.enableV3 || options.enableV31
+      // Android APK Signature Scheme v3 forbids multiple unrelated signers unless arranged in a SigningCertificateLineage
+      val buildLineage = useKeyRotationLineage && signerConfigs.size >= 2
+      val effectiveV3 = (options.enableV3 || options.enableV31) && (signerConfigs.size == 1 || buildLineage)
+      val effectiveV31 = options.enableV31 && effectiveV3
       val v4OutputFile =
         if (options.enableV4) File("${outputApk.absolutePath}.idsig") else null
 
@@ -87,6 +92,20 @@ object ApkSignerEngine {
             .setV4SigningEnabled(options.enableV4)
             .setCreatedBy(options.createdBy)
 
+        if (buildLineage) {
+          val lineageConfigs =
+            signers.map { mat ->
+              SigningCertificateLineage.SignerConfig.Builder(
+                com.android.apksig.KeyConfig.Jca(mat.privateKey),
+                mat.certificate,
+              ).build()
+            }
+          var lineage = SigningCertificateLineage.Builder(lineageConfigs[0], lineageConfigs[1]).build()
+          for (i in 2 until lineageConfigs.size) {
+            lineage = lineage.spawnDescendant(lineageConfigs[i - 1], lineageConfigs[i])
+          }
+          builder.setSigningCertificateLineage(lineage)
+        }
         if (v4OutputFile != null) {
           builder.setV4SignatureOutputFile(v4OutputFile)
         }
@@ -115,7 +134,7 @@ object ApkSignerEngine {
       val appliedSchemes = buildList {
         if (options.enableV1) add(SignatureSchemeVersion.V1)
         if (options.enableV2) add(SignatureSchemeVersion.V2)
-        if (effectiveV3) add(if (options.enableV31) SignatureSchemeVersion.V3_1 else SignatureSchemeVersion.V3)
+        if (effectiveV3) add(if (effectiveV31) SignatureSchemeVersion.V3_1 else SignatureSchemeVersion.V3)
         if (options.enableV4) add(SignatureSchemeVersion.V4)
       }
 

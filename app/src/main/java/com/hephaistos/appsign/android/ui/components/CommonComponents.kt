@@ -626,6 +626,10 @@ fun RootFolderExplorerDialog(
     },
     text = {
       Column(modifier = Modifier.fillMaxWidth()) {
+        val dirChildCount = entries.count { it.isDirectory && !it.isSymlink }
+        val fileChildCount = entries.count { !it.isDirectory && !it.isSymlink }
+        val symlinkChildCount = entries.count { it.isSymlink }
+
         FlowRow(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
           verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -637,7 +641,7 @@ fun RootFolderExplorerDialog(
             label = { Text(if (useRootMode) "Root (su)" else "Standard") },
             modifier = Modifier.testTag("os_explorer_root_toggle"),
           )
-          listOf("/", "/data/local", "/data/data", "/sdcard").forEach { shortcut ->
+          listOf("/", "/data/local", "/data/data", "/sdcard", "/storage/emulated/0").forEach { shortcut ->
             AssistChip(
               onClick = { currentDir = shortcut },
               label = { Text(shortcut, style = MaterialTheme.typography.labelSmall) },
@@ -645,21 +649,45 @@ fun RootFolderExplorerDialog(
           }
         }
 
+        if (!isLoading && loadError == null) {
+          Text(
+            text = "$dirChildCount dir • $fileChildCount files • $symlinkChildCount symlinks (${strings.osSymlinkIgnoredShort})",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+          )
+        }
+
         Spacer(Modifier.height(6.dp))
 
-        if (!useRootMode && loadError != null) {
-          OutlinedButton(
-            onClick = {
-              onDismiss()
-              onOpenSettings()
-            },
-            modifier = Modifier.fillMaxWidth(),
+        if (!useRootMode && (loadError != null || currentDir.startsWith("/data"))) {
+          Surface(
+            color = MaterialTheme.colorScheme.tertiaryContainer,
+            shape = MaterialTheme.shapes.small,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
           ) {
-            Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(strings.openSettings)
+            Column(modifier = Modifier.padding(8.dp)) {
+              Text(
+                text = strings.osRootRestrictedHint,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+              )
+              if (loadError != null) {
+                Spacer(Modifier.height(4.dp))
+                OutlinedButton(
+                  onClick = {
+                    onDismiss()
+                    onOpenSettings()
+                  },
+                  modifier = Modifier.fillMaxWidth(),
+                ) {
+                  Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+                  Spacer(Modifier.width(6.dp))
+                  Text(strings.openSettings)
+                }
+              }
+            }
           }
-          Spacer(Modifier.height(6.dp))
         }
 
         val parent = File(currentDir).parentFile

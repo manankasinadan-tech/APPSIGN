@@ -1,5 +1,6 @@
 package com.hephaistos.appsign.android.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -20,12 +21,14 @@ import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -41,21 +44,44 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hephaistos.appsign.android.data.local.ManagedKeyEntity
 import com.hephaistos.appsign.android.ui.components.ExpandableAuditCard
+import com.hephaistos.appsign.android.ui.components.FingerprintRow
 import com.hephaistos.appsign.android.ui.components.RootFolderExplorerDialog
 import com.hephaistos.appsign.android.ui.components.SectionCard
 import com.hephaistos.appsign.android.ui.components.StatusPillBadge
 import com.hephaistos.appsign.android.ui.i18n.LocalAppsignStrings
 import com.hephaistos.appsign.android.ui.viewmodel.OsSignUiState
 import com.hephaistos.appsign.core.model.IdentityInput
+import com.hephaistos.appsign.core.model.OsArtifactKind
 import com.hephaistos.appsign.core.model.OsResignKeyStrategy
 import com.hephaistos.appsign.core.model.OsSignInspectionReport
 import com.hephaistos.appsign.core.model.OsSignResignReport
+import com.hephaistos.appsign.core.model.SignatureSchemeVersion
+
+private enum class OsGroupFilter {
+  ALL,
+  WITH_REFS,
+  MULTI_SCHEME,
+  APEX_OR_JAR,
+}
+
+private fun isProtectedSystemPath(path: String): Boolean {
+  val trimmed = path.trim()
+  return trimmed.startsWith("/data/") ||
+    trimmed == "/data" ||
+    trimmed.startsWith("/system") ||
+    trimmed.startsWith("/vendor") ||
+    trimmed.startsWith("/product") ||
+    trimmed.startsWith("/apex") ||
+    trimmed.startsWith("/odm") ||
+    trimmed.startsWith("/system_ext")
+}
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -112,7 +138,10 @@ fun OsSignScreen(
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(
           value = state.targetDirPath,
-          onValueChange = { onSetDirectory(it, state.viaRoot) },
+          onValueChange = { typed ->
+            val autoRoot = state.viaRoot || (rootEnabled && isProtectedSystemPath(typed))
+            onSetDirectory(typed, autoRoot)
+          },
           placeholder = { Text("/data/local/gsi_unpacked") },
           singleLine = true,
           modifier = Modifier.fillMaxWidth().testTag("ossign_path_input"),
@@ -290,9 +319,49 @@ fun OsSignScreen(
 @Composable
 private fun OsInspectionDashboard(report: OsSignInspectionReport) {
   val strings = LocalAppsignStrings.current
-  SectionCard {
+  val context = LocalContext.current
+  var selectedFilter by remember(report.scannedAtIso) { mutableStateOf(OsGroupFilter.ALL) }
+
+  val allSignedArtifacts = remember(report) { report.groups.flatMap { it.artifacts }.distinctBy { it.relativePath } }
+  val apkCount = remember(allSignedArtifacts) { allSignedArtifacts.count { it.kind == OsArtifactKind.APK } }
+  val apexCount = remember(allSignedArtifacts) { allSignedArtifacts.count { it.kind == OsArtifactKind.APEX } }
+  val jarCount = remember(allSignedArtifacts) { allSignedArtifacts.count { it.kind == OsArtifactKind.JAR } }
+  val verifiedCount = remember(allSignedArtifacts) { allSignedArtifacts.count { it.verified } }
+  val multiSignerCount = remember(allSignedArtifacts) { allSignedArtifacts.count { it.allSignerSha256s.size > 1 } }
+  val rotationCount = remember(allSignedArtifacts) { allSignedArtifacts.count { it.apkReport?.keyRotation?.hasRotation == true } }
+
+  val schemeCounts = remember(allSignedArtifacts) {
+    SignatureSchemeVersion.entries.mapNotNull { scheme ->
+      val count = allSignedArtifacts.count { scheme in it.schemes }
+      if (count > 0) scheme to count else null
+    }
+  }
+  val roleCounts = remember(allSignedArtifacts) {
+    allSignedArtifacts
+      .groupingBy { it.inferredRole.ifBlank { "system" } }
+      .eachCount()
+      .entries
+      .sortedByDescending { it.value }
+  }
+  val filteredGroups = remember(report.groups, selectedFilter) {
+    when (selectedFilter) {
+      OsGroupFilter.ALL -> report.groups
+      OsGroupFilter.WITH_REFS -> report.groups.filter { it.permissionReferences.isNotEmpty() }
+      OsGroupFilter.MULTI_SCHEME -> report.groups.filter { it.recommendedSchemes.size > 1 }
+      OsGroupFilter.APEX_OR_JAR ->
+        report.groups.filter { g -> g.artifacts.any { it.kind != OsArtifactKind.APK } }
+    }
+  }
+
+  SectionCard(modifier = Modifier.testTag("ossign_inspection_dashboard")) {
     Text(strings.osTrustChainTitle, style = MaterialTheme.typography.titleMedium)
-    Spacer(Modifier.height(8.dp))
+    Text(
+      text = strings.osScanStatsFormat(report.durationMs, report.totalFilesVisited),
+      style = MaterialTheme.typography.labelSmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(10.dp))
+
     FlowRow(
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -306,6 +375,15 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
         text = "${report.signedArtifactsCount} Signed",
         containerColor = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+      )
+      StatusPillBadge(
+        text = "$verifiedCount/${allSignedArtifacts.size} Valid",
+        containerColor =
+          if (verifiedCount == allSignedArtifacts.size) MaterialTheme.colorScheme.secondaryContainer
+          else MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor =
+          if (verifiedCount == allSignedArtifacts.size) MaterialTheme.colorScheme.onSecondaryContainer
+          else MaterialTheme.colorScheme.onTertiaryContainer,
       )
       StatusPillBadge(
         text = "${report.allPermissionReferences.size} Perm Refs",
@@ -323,6 +401,60 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
         contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
+
+    Spacer(Modifier.height(10.dp))
+    Text(
+      text = "APK: $apkCount • APEX: $apexCount • JAR: $jarCount • Multi-signer: $multiSignerCount • Rotation: $rotationCount",
+      style = MaterialTheme.typography.labelMedium,
+      color = MaterialTheme.colorScheme.onSurface,
+    )
+
+    if (schemeCounts.isNotEmpty()) {
+      Spacer(Modifier.height(10.dp))
+      Text(
+        text = strings.osSchemeBreakdownTitle,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+      )
+      Spacer(Modifier.height(6.dp))
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        schemeCounts.forEach { (scheme, count) ->
+          StatusPillBadge(
+            text = "${scheme.name}: $count",
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+          )
+        }
+      }
+    }
+
+    if (roleCounts.isNotEmpty()) {
+      Spacer(Modifier.height(10.dp))
+      Text(
+        text = strings.osPartitionsTitle,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+      )
+      Spacer(Modifier.height(6.dp))
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        roleCounts.forEach { (role, count) ->
+          StatusPillBadge(
+            text = "$role ($count)",
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+      }
+    }
+
+    Spacer(Modifier.height(10.dp))
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     Spacer(Modifier.height(8.dp))
     report.trustChainSummary.forEach { line ->
       Text("• $line", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -339,42 +471,158 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
     }
   }
 
-  Spacer(Modifier.height(12.dp))
-  Text(strings.osGroupsDashboardTitle, style = MaterialTheme.typography.titleMedium)
+  Spacer(Modifier.height(14.dp))
+  Text("${strings.osGroupsDashboardTitle} (${filteredGroups.size}/${report.groups.size})", style = MaterialTheme.typography.titleMedium)
   Spacer(Modifier.height(8.dp))
 
-  report.groups.forEach { grp ->
+  FlowRow(
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+    modifier = Modifier.padding(bottom = 10.dp),
+  ) {
+    FilterChip(
+      selected = selectedFilter == OsGroupFilter.ALL,
+      onClick = { selectedFilter = OsGroupFilter.ALL },
+      label = { Text(strings.osFilterAll) },
+    )
+    FilterChip(
+      selected = selectedFilter == OsGroupFilter.WITH_REFS,
+      onClick = { selectedFilter = OsGroupFilter.WITH_REFS },
+      label = { Text(strings.osFilterWithRefs) },
+    )
+    FilterChip(
+      selected = selectedFilter == OsGroupFilter.MULTI_SCHEME,
+      onClick = { selectedFilter = OsGroupFilter.MULTI_SCHEME },
+      label = { Text(strings.osFilterMultiScheme) },
+    )
+    FilterChip(
+      selected = selectedFilter == OsGroupFilter.APEX_OR_JAR,
+      onClick = { selectedFilter = OsGroupFilter.APEX_OR_JAR },
+      label = { Text(strings.osFilterApexJar) },
+    )
+  }
+
+  filteredGroups.forEachIndexed { idx, grp ->
+    val flagBits = buildList {
+      if (grp.hasMultipleSignersInMembers) add("Multi-signer")
+      if (grp.hasKeyRotationInMembers) add("Rotation")
+    }.joinToString(" • ")
+    val subtitleText = buildString {
+      append("${grp.keySpec.keyAlgorithm} ${grp.keySpec.keySizeBits}-bit • ${grp.artifacts.size} artifact(s) • ${grp.permissionReferences.size} ref(s)")
+      if (flagBits.isNotBlank()) append(" • $flagBits")
+    }
     ExpandableAuditCard(
       title = grp.label,
-      subtitle = "${grp.keySpec.keyAlgorithm} ${grp.keySpec.keySizeBits}-bit • ${grp.artifacts.size} artifact(s) • ${grp.permissionReferences.size} ref(s)",
-      initiallyExpanded = false,
+      subtitle = subtitleText,
+      initiallyExpanded = idx == 0 && filteredGroups.size == 1,
       trailingBadge = {
         StatusPillBadge(
-          text = grp.recommendedSchemes.joinToString(",") { it.name },
+          text = grp.recommendedSchemes.joinToString("·") { it.name },
           containerColor = MaterialTheme.colorScheme.primaryContainer,
           contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         )
       },
     ) {
       Text("Subject: ${grp.certificate.subjectDn}", style = MaterialTheme.typography.bodySmall)
-      Text("SHA-256: ${grp.sha256}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text("Issuer: ${grp.certificate.issuerDn}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Text("Validity: ${grp.validityDays}d (${grp.certificate.notBeforeIso.take(10)} → ${grp.certificate.notAfterIso.take(10)})", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      Spacer(Modifier.height(6.dp))
+      FingerprintRow(
+        label = "SHA-256",
+        value = grp.sha256,
+        onCopied = { Toast.makeText(context, strings.copiedToClipboard, Toast.LENGTH_SHORT).show() },
+      )
+      FingerprintRow(
+        label = "SHA-1",
+        value = grp.certificate.fingerprints.sha1,
+        onCopied = { Toast.makeText(context, strings.copiedToClipboard, Toast.LENGTH_SHORT).show() },
+      )
       Spacer(Modifier.height(6.dp))
       HorizontalDivider()
-      Spacer(Modifier.height(6.dp))
+      Spacer(Modifier.height(8.dp))
       grp.artifacts.forEach { art ->
-        Text(
-          text = "• [${art.kind.name}] ${art.relativePath} (${art.status})",
-          style = MaterialTheme.typography.labelSmall,
-        )
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Icon(
+            imageVector = if (art.verified) Icons.Rounded.CheckCircle else Icons.Rounded.ErrorOutline,
+            contentDescription = null,
+            tint = if (art.verified) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.tertiary,
+            modifier = Modifier.size(16.dp),
+          )
+          Spacer(Modifier.width(6.dp))
+          Column(modifier = Modifier.weight(1f)) {
+            Text(
+              text = art.relativePath,
+              style = MaterialTheme.typography.labelMedium,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+            )
+            val meta = buildString {
+              append("${art.kind.name} • ${art.inferredRole}")
+              if (art.schemes.isNotEmpty()) {
+                append(" • [${art.schemes.joinToString(" · ") { it.name }}]")
+              }
+              if (art.allSignerSha256s.size > 1) {
+                append(" • ${art.allSignerSha256s.size} signers")
+              }
+              if (art.apexHasEmbeddedPubKey) {
+                append(" • apex_pubkey")
+              }
+            }
+            Text(
+              text = meta,
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
       }
       if (grp.permissionReferences.isNotEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(Modifier.height(6.dp))
         Text(strings.osPermRefsTitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(4.dp))
         grp.permissionReferences.forEach { ref ->
           Text(
-            text = "• ${ref.relativePath} [${ref.format.name} x${ref.occurrences}]",
+            text = "• ${ref.relativePath} [${ref.format.name} ×${ref.occurrences}]",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+          if (ref.previewSnippet.isNotBlank()) {
+            Text(
+              text = "  ${ref.previewSnippet}",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+      }
+    }
+    Spacer(Modifier.height(8.dp))
+  }
+
+  if (report.allPermissionReferences.isNotEmpty()) {
+    ExpandableAuditCard(
+      title = "${strings.osPermMapTitle} (${report.allPermissionReferences.size})",
+      subtitle = report.allPermissionReferences.map { it.relativePath }.distinct().size.let { "$it file(s)" },
+    ) {
+      report.allPermissionReferences.forEach { ref ->
+        Text(
+          text = "• ${ref.relativePath} [${ref.format.name} ×${ref.occurrences}] → ${ref.matchedSignerSha256.take(14)}...",
+          style = MaterialTheme.typography.labelSmall,
+        )
+        if (ref.previewSnippet.isNotBlank()) {
+          Text(
+            text = "  ${ref.previewSnippet}",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
           )
         }
       }

@@ -149,6 +149,10 @@ class ExampleRobolectricTest {
       composeTestRule.waitUntil(timeoutMillis = 15_000) {
         composeTestRule.onAllNodesWithText("1 Key Groups").fetchSemanticsNodes().isNotEmpty()
       }
+      composeTestRule.onNodeWithText("V1: 1").performScrollTo().assertIsDisplayed()
+      composeTestRule.onNodeWithText("V2: 1").performScrollTo().assertIsDisplayed()
+      composeTestRule.onNodeWithText("V3: 1").performScrollTo().assertIsDisplayed()
+      composeTestRule.onNodeWithText("priv-app (1)").performScrollTo().assertIsDisplayed()
 
       // Open RESIGNER 3-strategy popup and run strategy 1 (CREATE_WITH_IDENTITIES)
       composeTestRule.onNodeWithTag("ossign_resign_button").performScrollTo().performClick()

@@ -185,6 +185,15 @@ data class AppsignStrings(
   val osStrategyCloneDesc: String,
   val osMissingKeyMapping: String,
   val osConfirmResign: String,
+  val osFilterAll: String,
+  val osFilterWithRefs: String,
+  val osFilterMultiScheme: String,
+  val osFilterApexJar: String,
+  val osSchemeBreakdownTitle: String,
+  val osPartitionsTitle: String,
+  val osPermMapTitle: String,
+  val osScanStatsFormat: (Long, Int) -> String,
+  val osRootRestrictedHint: String,
 )
 
 val LocalAppsignStrings = staticCompositionLocalOf { englishStrings() }
@@ -367,6 +376,15 @@ fun frenchStrings(): AppsignStrings =
     osStrategyCloneDesc = "Recrée de nouvelles paires .ask en conservant exactement les identités X.509 et paramètres de la cible.",
     osMissingKeyMapping = "Associez une clé .ask à chaque groupe.",
     osConfirmResign = "Lancer RESIGNER",
+    osFilterAll = "Tous",
+    osFilterWithRefs = "Avec XML/PEM",
+    osFilterMultiScheme = "Multi-schémas",
+    osFilterApexJar = "APEX / JAR",
+    osSchemeBreakdownTitle = "Schémas détectés dans la cible",
+    osPartitionsTitle = "Partitions & Rôles",
+    osPermMapTitle = "Cartographie permissions & certificats",
+    osScanStatsFormat = { ms, files -> "Analyse en $ms ms • $files fichiers inspectés" },
+    osRootRestrictedHint = "Dossiers protégés (/data/data, /data/local) : activez Root (su) ci-dessus.",
   )
 
 fun englishStrings(): AppsignStrings =
@@ -541,6 +559,15 @@ fun englishStrings(): AppsignStrings =
     osStrategyCloneDesc = "Generates new .ask containers keeping the exact X.509 DN identities and crypto parameters of the target.",
     osMissingKeyMapping = "Please assign an .ask key to every detected group.",
     osConfirmResign = "Start RESIGN",
+    osFilterAll = "All",
+    osFilterWithRefs = "With XML/PEM",
+    osFilterMultiScheme = "Multi-scheme",
+    osFilterApexJar = "APEX / JAR",
+    osSchemeBreakdownTitle = "Detected Scheme Breakdown",
+    osPartitionsTitle = "Partitions & Roles",
+    osPermMapTitle = "Permission & Certificate Mapping",
+    osScanStatsFormat = { ms, files -> "Scanned in $ms ms • $files files inspected" },
+    osRootRestrictedHint = "Protected paths (/data/data, /data/local): enable Root (su) above.",
   )
 
 private fun frenchDocSections(): List<DocSection> =

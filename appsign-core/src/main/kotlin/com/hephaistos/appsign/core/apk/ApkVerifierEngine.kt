@@ -71,6 +71,9 @@ object ApkVerifierEngine {
         throw ApkOperationException("Failed to verify APK '${apkFile.name}': ${e.message}", e)
       }
 
+    // Physical + cryptographic per-scheme inspection so v1/v2 are NEVER masked on high-minSdk APKs
+    val blockInfo = ApkSigningBlockInspector.inspect(apkFile)
+
     val errors = result.allErrors.map { it.toString() }.distinct().toMutableList()
     val warnings =
       buildList {
@@ -83,23 +86,65 @@ object ApkVerifierEngine {
         result.v4SchemeSigners.forEach { signer -> signer.warnings.forEach { add(it.toString()) } }
       }.distinct().toMutableList()
 
-    val v1Signers = result.v1SchemeSigners.mapNotNull { it.certificate }
-    val v2Signers = result.v2SchemeSigners.mapNotNull { it.certificate }
-    val v3Signers = result.v3SchemeSigners.mapNotNull { it.certificate }
-    val v31Signers = result.v31SchemeSigners.mapNotNull { it.certificate }
+    // V1: Combine apksig result + JAR signature verification when minSdk >= 24 caused apksig to skip V1
+    val apksigV1Signers = result.v1SchemeSigners.mapNotNull { it.certificate }
+    val v1JarVerification =
+      if (blockInfo.v1EntriesPresent && !result.isVerifiedUsingV1Scheme) {
+        JarSignerEngine.verifyJar(apkFile)
+      } else {
+        null
+      }
+    val v1Signers =
+      when {
+        apksigV1Signers.isNotEmpty() -> apksigV1Signers
+        blockInfo.v1ExtractedSigners.isNotEmpty() -> blockInfo.v1ExtractedSigners
+        v1JarVerification != null && v1JarVerification.signers.isNotEmpty() ->
+          v1JarVerification.signers.map {
+            CryptoSupport.parseX509Certificate(it.certificatePem.toByteArray(Charsets.UTF_8))
+          }
+        else -> emptyList()
+      }
+    val v1Present =
+      result.isVerifiedUsingV1Scheme ||
+        apksigV1Signers.isNotEmpty() ||
+        blockInfo.v1EntriesPresent
+    val v1Verified =
+      result.isVerifiedUsingV1Scheme || (v1JarVerification?.verified == true)
+
+    // V2: Combine apksig result + physical APK Signing Block V2 inspection & verification
+    val apksigV2Signers = result.v2SchemeSigners.mapNotNull { it.certificate }
+    val v2Signers = if (apksigV2Signers.isNotEmpty()) apksigV2Signers else blockInfo.v2Signers
+    val v2Present = result.isVerifiedUsingV2Scheme || v2Signers.isNotEmpty() || blockInfo.v2Present
+    val v2Verified = result.isVerifiedUsingV2Scheme || blockInfo.v2Verified
+
+    // V3: Combine apksig result + physical APK Signing Block V3 inspection & verification
+    val apksigV3Signers = result.v3SchemeSigners.mapNotNull { it.certificate }
+    val v3Signers = if (apksigV3Signers.isNotEmpty()) apksigV3Signers else blockInfo.v3Signers
+    val v3Present = result.isVerifiedUsingV3Scheme || v3Signers.isNotEmpty() || blockInfo.v3Present
+    val v3Verified = result.isVerifiedUsingV3Scheme || blockInfo.v3Verified
+
+    // V3.1: Combine apksig result + physical V3.1 block
+    val apksigV31Signers = result.v31SchemeSigners.mapNotNull { it.certificate }
+    val v31Signers = if (apksigV31Signers.isNotEmpty()) apksigV31Signers else blockInfo.v31Signers
+    val v31Present = result.isVerifiedUsingV31Scheme || v31Signers.isNotEmpty() || blockInfo.v31Present
+    val v31Verified = result.isVerifiedUsingV31Scheme
+
+    // V4
     val v4Signers = result.v4SchemeSigners.mapNotNull { it.certificate }
 
     val v1Result =
       SchemeVerificationResult(
         scheme = SignatureSchemeVersion.V1,
-        present = result.isVerifiedUsingV1Scheme || v1Signers.isNotEmpty(),
-        verified = result.isVerifiedUsingV1Scheme,
+        present = v1Present,
+        verified = v1Verified,
         signerCount = v1Signers.size,
         signers = v1Signers.map { CryptoSupport.extractCertificateDetails(it) },
         notes =
           buildList {
-            if (!result.isVerifiedUsingV1Scheme && v1Signers.isEmpty()) {
+            if (!v1Present) {
               add("No JAR (v1) signature present.")
+            } else if (!result.isVerifiedUsingV1Scheme && v1JarVerification?.verified == true) {
+              add("JAR (v1) signature present and verified independently (manifest minSdk skips v1 at runtime).")
             }
           },
       )
@@ -107,17 +152,23 @@ object ApkVerifierEngine {
     val v2Result =
       SchemeVerificationResult(
         scheme = SignatureSchemeVersion.V2,
-        present = result.isVerifiedUsingV2Scheme || v2Signers.isNotEmpty(),
-        verified = result.isVerifiedUsingV2Scheme,
+        present = v2Present,
+        verified = v2Verified,
         signerCount = v2Signers.size,
         signers = v2Signers.map { CryptoSupport.extractCertificateDetails(it) },
+        notes =
+          buildList {
+            if (v2Present && !result.isVerifiedUsingV2Scheme && blockInfo.v2Verified) {
+              add("APK Signature Scheme v2 present and verified from APK Signing Block (0x7109871a).")
+            }
+          },
       )
 
     val v3Result =
       SchemeVerificationResult(
         scheme = SignatureSchemeVersion.V3,
-        present = result.isVerifiedUsingV3Scheme || v3Signers.isNotEmpty(),
-        verified = result.isVerifiedUsingV3Scheme,
+        present = v3Present,
+        verified = v3Verified,
         signerCount = v3Signers.size,
         signers = v3Signers.map { CryptoSupport.extractCertificateDetails(it) },
       )
@@ -125,8 +176,8 @@ object ApkVerifierEngine {
     val v31Result =
       SchemeVerificationResult(
         scheme = SignatureSchemeVersion.V3_1,
-        present = result.isVerifiedUsingV31Scheme || v31Signers.isNotEmpty(),
-        verified = result.isVerifiedUsingV31Scheme,
+        present = v31Present,
+        verified = v31Verified,
         signerCount = v31Signers.size,
         signers = v31Signers.map { CryptoSupport.extractCertificateDetails(it) },
       )
@@ -149,10 +200,19 @@ object ApkVerifierEngine {
     val schemeResults = listOf(v1Result, v2Result, v3Result, v31Result, v4Result)
 
     val uniqueCertMap = linkedMapOf<String, X509Certificate>()
-    for (cert in result.signerCertificates) {
-      val sha256 = CryptoSupport.certificateFingerprints(cert).sha256
-      uniqueCertMap.putIfAbsent(sha256, cert)
+    fun registerCerts(certs: List<X509Certificate>) {
+      for (cert in certs) {
+        val sha256 = CryptoSupport.certificateFingerprints(cert).sha256
+        uniqueCertMap.putIfAbsent(sha256, cert)
+      }
     }
+    registerCerts(result.signerCertificates)
+    registerCerts(v31Signers)
+    registerCerts(v3Signers)
+    registerCerts(v2Signers)
+    registerCerts(v1Signers)
+    registerCerts(v4Signers)
+
     val allUniqueDetails = uniqueCertMap.values.map { CryptoSupport.extractCertificateDetails(it) }
 
     // Cryptographic & validity advisories

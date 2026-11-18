@@ -780,8 +780,16 @@ class AppsignViewModel(
     if (cur.targetDirPath.isBlank() || cur.isRunning) return
     viewModelScope.launch {
       _osSignState.value = cur.copy(isRunning = true, errorMessage = null, statusMessage = null)
+      var resolvedViaRoot = cur.viaRoot
       runCatching {
-        coordinator.runOsVerify(cur.targetDirPath, cur.viaRoot) { count, label ->
+        coordinator.runOsVerify(
+          targetDirPath = cur.targetDirPath,
+          viaRoot = cur.viaRoot,
+          onResolvedRootMode = { usedRoot ->
+            resolvedViaRoot = usedRoot
+            _osSignState.value = _osSignState.value.copy(viaRoot = usedRoot)
+          },
+        ) { count, label ->
           _osSignState.value =
             _osSignState.value.copy(progressCurrent = count, progressLabel = label)
         }
@@ -789,6 +797,7 @@ class AppsignViewModel(
         _osSignState.value =
           _osSignState.value.copy(
             isRunning = false,
+            viaRoot = resolvedViaRoot,
             inspectionReport = report,
             progressLabel = "",
           )
@@ -822,6 +831,7 @@ class AppsignViewModel(
           errorMessage = null,
           statusMessage = null,
         )
+      var resolvedViaRoot = cur.viaRoot
       runCatching {
         coordinator.runOsResign(
           targetDirPath = cur.targetDirPath,
@@ -833,6 +843,10 @@ class AppsignViewModel(
           passphrasesPerGroup = passphrasesPerGroup,
           clonePassphrase = clonePassphrase,
           createBackups = createBackups,
+          onResolvedRootMode = { usedRoot ->
+            resolvedViaRoot = usedRoot
+            _osSignState.value = _osSignState.value.copy(viaRoot = usedRoot)
+          },
         ) { idx, total, label ->
           _osSignState.value =
             _osSignState.value.copy(progressCurrent = idx, progressTotal = total, progressLabel = label)
@@ -842,9 +856,10 @@ class AppsignViewModel(
         _osSignState.value =
           _osSignState.value.copy(
             isRunning = false,
+            viaRoot = resolvedViaRoot,
             resignReport = report,
             activeBackupManifest = updatedManifest,
-            activeBackupViaRoot = if (report.backupManifest != null) cur.viaRoot else _osSignState.value.activeBackupViaRoot,
+            activeBackupViaRoot = if (report.backupManifest != null) resolvedViaRoot else _osSignState.value.activeBackupViaRoot,
             progressLabel = "",
             statusMessage = "Resigned ${report.totalSucceeded}/${report.totalResigned} artifacts",
           )

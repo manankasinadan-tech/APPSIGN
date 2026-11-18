@@ -148,14 +148,33 @@ class OsSignAndProCoordinator(
     return primaryProResult ?: throw IllegalStateException("No target APK processed.")
   }
 
+  private suspend fun resolveEffectiveViaRoot(targetDirPath: String, requestedViaRoot: Boolean): Boolean {
+    if (requestedViaRoot) return true
+    val localDir = File(targetDirPath)
+    if (localDir.exists() && localDir.isDirectory && localDir.canRead()) {
+      return false
+    }
+    val probe = RootBridge.probeRootAccess()
+    if (probe.available) {
+      return true
+    }
+    throw IllegalArgumentException(
+      "Directory not found or inaccessible (${targetDirPath}). If this path is under /data or system partitions, enable Root (su) in Settings."
+    )
+  }
+
   suspend fun runOsVerify(
     targetDirPath: String,
     viaRoot: Boolean,
+    onResolvedRootMode: (Boolean) -> Unit = {},
     onProgress: (Int, String) -> Unit,
   ): OsSignInspectionReport {
+    val effectiveViaRoot = resolveEffectiveViaRoot(targetDirPath, viaRoot)
+    onResolvedRootMode(effectiveViaRoot)
+
     val scanRoot =
-      if (viaRoot) {
-        onProgress(0, "Root staging...")
+      if (effectiveViaRoot) {
+        onProgress(0, "Root staging (global mount namespace)...")
         RootBridge.stageDirectoryTreeViaRoot(targetDirPath, osStagingDir)
         osStagingDir
       } else {
@@ -164,7 +183,7 @@ class OsSignAndProCoordinator(
 
     val rawReport = withContext(Dispatchers.IO) { OsSignAnalyzerEngine.analyzeDirectory(scanRoot, onProgress) }
     val normalizedReport =
-      if (viaRoot) {
+      if (effectiveViaRoot) {
         rawReport.copy(rootDirectory = targetDirPath)
       } else {
         rawReport
@@ -191,11 +210,20 @@ class OsSignAndProCoordinator(
     passphrasesPerGroup: Map<String, CharArray>,
     clonePassphrase: CharArray?,
     createBackups: Boolean,
+    onResolvedRootMode: (Boolean) -> Unit = {},
     onProgress: (Int, Int, String) -> Unit,
   ): OsSignResignReport {
+    val effectiveViaRoot = resolveEffectiveViaRoot(targetDirPath, viaRoot)
+    onResolvedRootMode(effectiveViaRoot)
+
     val inspection =
-      existingInspection
-        ?: runOsVerify(targetDirPath, viaRoot) { count, label -> onProgress(count, 0, label) }
+      if (existingInspection != null && (!effectiveViaRoot || osStagingDir.exists())) {
+        existingInspection
+      } else {
+        runOsVerify(targetDirPath, effectiveViaRoot, onResolvedRootMode) { count, label ->
+          onProgress(count, 0, label)
+        }
+      }
 
     val unlockedMap =
       if (strategy == OsResignKeyStrategy.USE_EXISTING_KEYS) {
@@ -218,7 +246,7 @@ class OsSignAndProCoordinator(
         identityPerGroup = identitiesPerGroup,
         existingKeyPerGroup = unlockedMap,
         clonePassphrase = clonePassphrase,
-        createBackups = if (viaRoot) false else createBackups,
+        createBackups = if (effectiveViaRoot) false else createBackups,
       )
 
     val rawReport =
@@ -237,7 +265,7 @@ class OsSignAndProCoordinator(
     }
 
     val finalManifest =
-      if (viaRoot) {
+      if (effectiveViaRoot) {
         val changedRelPaths =
           (rawReport.outcomes.filter { it.success }.map { it.relativePath } +
             inspection.allPermissionReferences.map { it.relativePath }).distinct()
@@ -258,7 +286,7 @@ class OsSignAndProCoordinator(
       )
 
     if (finalManifest != null) {
-      savePersistedBackupState(viaRoot = viaRoot, manifest = finalManifest)
+      savePersistedBackupState(viaRoot = effectiveViaRoot, manifest = finalManifest)
     }
 
     historyRepo.logOperation(

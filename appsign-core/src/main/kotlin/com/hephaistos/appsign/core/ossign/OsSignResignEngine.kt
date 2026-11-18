@@ -171,7 +171,7 @@ object OsSignResignEngine {
               }
               OsArtifactKind.APK,
               OsArtifactKind.APEX -> {
-                // Use target's exact scheme combination (or all signer keys if multi-signer)
+                // Reproduce target's exact signer set, scheme mask, and rotation/minSdk logic
                 val signerList =
                   artifact.allSignerSha256s.mapNotNull { sha ->
                     groupByOldSha[sha]?.let { resolvedKeys[it.groupId] }
@@ -180,8 +180,12 @@ object OsSignResignEngine {
                 val schemes = artifact.schemes
                 val enableV1 = if (schemes.isEmpty()) true else SignatureSchemeVersion.V1 in schemes
                 val enableV2 = if (schemes.isEmpty()) true else SignatureSchemeVersion.V2 in schemes
-                val enableV31 = SignatureSchemeVersion.V3_1 in schemes
-                val enableV3 = (SignatureSchemeVersion.V3 in schemes) || enableV31
+                val hasRotation = artifact.apkReport?.keyRotation?.hasRotation == true
+                val allowV3 = signerList.size == 1 || hasRotation
+                val enableV31 = (SignatureSchemeVersion.V3_1 in schemes) && allowV3
+                val enableV3 = ((SignatureSchemeVersion.V3 in schemes) || enableV31) && allowV3
+                val targetMinSdk =
+                  com.hephaistos.appsign.core.pro.ResignProEngine.extractMinSdkVersion(targetFile)
 
                 val opts =
                   SigningOptions(
@@ -191,15 +195,22 @@ object OsSignResignEngine {
                     enableV31 = enableV31,
                     enableV4 = false, // V4 .idsig is incremental install sidecar, not used inside static partitions
                     alignBeforeSign = true,
-                    minSdkVersion = null,
+                    minSdkVersion = targetMinSdk,
                   )
-                val res = ApkSignerEngine.resignWithSigners(targetFile, tempOut, signerList, opts)
+                val res =
+                  ApkSignerEngine.resignWithSigners(
+                    inputApk = targetFile,
+                    outputApk = tempOut,
+                    signers = signerList,
+                    options = opts,
+                    useKeyRotationLineage = hasRotation && signerList.size >= 2,
+                  )
                 if (!res.success) {
                   throw IllegalStateException(res.errorMessage ?: "APK/APEX signing failed")
                 }
                 replaceInPlaceSafely(tempOut, targetFile)
                 val verifyMinSdk =
-                  com.hephaistos.appsign.core.pro.ResignProEngine.extractMinSdkVersion(targetFile)
+                  targetMinSdk
                     ?: when {
                       enableV1 -> null
                       enableV2 -> 24

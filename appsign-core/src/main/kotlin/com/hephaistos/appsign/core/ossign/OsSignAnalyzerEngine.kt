@@ -146,6 +146,7 @@ object OsSignAnalyzerEngine {
 
     // Build reverse lookup indices from known signers for dynamic reference scanning
     val refMatches = mutableListOf<OsPermissionReference>()
+    val seinfoHintsBySha = mutableMapOf<String, String>()
     val signerSha256ColonToCert = certBySha256.keys.associateBy { it.lowercase() }
     val signerSha256CompactToSha256 =
       certBySha256.keys.associateBy { it.replace(":", "").lowercase() }
@@ -163,21 +164,34 @@ object OsSignAnalyzerEngine {
           file = refFile,
           relativePath = rel,
           knownCertsBySha256 = certBySha256,
+          seinfoHintsBySha = seinfoHintsBySha,
           signerSha256ColonToCert = signerSha256ColonToCert,
           signerSha256CompactToSha256 = signerSha256CompactToSha256,
           signerSha1ColonToSha256 = signerSha1ColonToSha256,
           signerSha1CompactToSha256 = signerSha1CompactToSha256,
         )
     }
+    // Ensure X509Certificate map also has certs discovered solely in XML/PEM/DER files
+    certBySha256.forEach { (sha, details) ->
+      certsX509BySha256.putIfAbsent(
+        sha,
+        CryptoSupport.parseX509Certificate(details.certificatePem.toByteArray(Charsets.UTF_8)),
+      )
+    }
 
     val signedArtifacts = scannedArtifacts.filter { it.trustAction == OsTrustAction.REQUIRES_RESIGN }
     val preservedArtifacts = scannedArtifacts.filter { it.trustAction != OsTrustAction.REQUIRES_RESIGN }
 
-    // Group signed artifacts and permission references by primary signer SHA-256
+    // Group signed artifacts by primary signer SHA-256 while preserving all co-signers as valid groups
     val groupedBySha = linkedMapOf<String, MutableList<OsScannedArtifact>>()
     for (art in signedArtifacts) {
       val key = art.primarySignerSha256 ?: continue
       groupedBySha.getOrPut(key) { mutableListOf() }.add(art)
+      for (coSha in art.allSignerSha256s) {
+        if (certBySha256.containsKey(coSha)) {
+          groupedBySha.putIfAbsent(coSha, mutableListOf())
+        }
+      }
     }
     // Include groups referenced ONLY in permission XMLs/PEMs if a valid X.509 was discovered
     for (ref in refMatches) {
@@ -186,8 +200,14 @@ object OsSignAnalyzerEngine {
       }
     }
 
-    val groups =
+    val rawLabels =
       groupedBySha.entries.mapIndexed { index, (sha256, members) ->
+        sha256 to inferGroupLabel(index, certBySha256.getValue(sha256), members, seinfoHintsBySha[sha256])
+      }.toMap()
+    val duplicateLabels = rawLabels.values.groupingBy { it }.eachCount().filter { it.value > 1 }.keys
+
+    val groups =
+      groupedBySha.entries.map { (sha256, members) ->
         val certDetails = certBySha256.getValue(sha256)
         val x509 = certsX509BySha256.getValue(sha256)
         val keySpec = CryptoSupport.extractExactKeySpec(x509)
@@ -196,8 +216,12 @@ object OsSignAnalyzerEngine {
           members
             .flatMap { it.schemes }
             .distinct()
+            .sortedBy { it.ordinal }
             .ifEmpty { listOf(SignatureSchemeVersion.V1, SignatureSchemeVersion.V2, SignatureSchemeVersion.V3) }
-        val inferredLabel = inferGroupLabel(index, certDetails, members)
+        val baseLabel = rawLabels.getValue(sha256)
+        val shortHex = sha256.replace(":", "").take(4).uppercase()
+        val finalLabel =
+          if (baseLabel in duplicateLabels) "$baseLabel · $shortHex" else baseLabel
         val validityDays =
           runCatching {
             val s = Instant.parse(certDetails.notBeforeIso)
@@ -207,7 +231,7 @@ object OsSignAnalyzerEngine {
 
         OsSignatureGroup(
           groupId = "grp_${sha256.replace(":", "").take(12).lowercase()}",
-          label = inferredLabel,
+          label = finalLabel,
           sha256 = sha256,
           certificate = certDetails,
           keySpec = keySpec,
@@ -232,8 +256,24 @@ object OsSignAnalyzerEngine {
       warnings += "$symlinksIgnored symbolic link(s) strictly ignored and left untouched."
     }
 
+    val v1Count = signedArtifacts.count { SignatureSchemeVersion.V1 in it.schemes }
+    val v2Count = signedArtifacts.count { SignatureSchemeVersion.V2 in it.schemes }
+    val v3Count = signedArtifacts.count { SignatureSchemeVersion.V3 in it.schemes }
+    val v31Count = signedArtifacts.count { SignatureSchemeVersion.V3_1 in it.schemes }
+    val roleSummary =
+      signedArtifacts
+        .groupingBy { it.inferredRole }
+        .eachCount()
+        .entries
+        .sortedByDescending { it.value }
+        .joinToString(", ") { "${it.key}:${it.value}" }
+
     val trustChainSummary = buildList {
       add("Detected ${groups.size} distinct cryptographic key group(s) across ${signedArtifacts.size} signed artifact(s).")
+      add("Schemes detected -> V1:$v1Count, V2:$v2Count, V3:$v3Count, V3.1:$v31Count.")
+      if (roleSummary.isNotBlank()) {
+        add("Partitions/Roles -> $roleSummary.")
+      }
       add("Preserving ${preservedArtifacts.size} unsigned/non-impacting artifact(s) untouched.")
       add("Detected ${refMatches.size} cryptographic signature reference(s) across permission/config files.")
       add("Ignored $symlinksIgnored symbolic link(s) (never followed or modified).")
@@ -366,10 +406,13 @@ object OsSignAnalyzerEngine {
     return hasManifestApex to hasPubKey
   }
 
+  private val seinfoRegex = Regex("""<seinfo\s+value="([^"]+)"\s*/?>""", RegexOption.IGNORE_CASE)
+
   private fun scanReferenceFile(
     file: File,
     relativePath: String,
     knownCertsBySha256: MutableMap<String, CertificateDetails>,
+    seinfoHintsBySha: MutableMap<String, String>,
     signerSha256ColonToCert: Map<String, String>,
     signerSha256CompactToSha256: Map<String, String>,
     signerSha1ColonToSha256: Map<String, String>,
@@ -410,6 +453,12 @@ object OsSignAnalyzerEngine {
       val details = CryptoSupport.extractCertificateDetails(cert)
       val sha = details.fingerprints.sha256
       knownCertsBySha256.putIfAbsent(sha, details)
+      val windowEnd = minOf(text.length, match.range.last + 500)
+      val tailSnippet = text.substring(match.range.last + 1, windowEnd)
+      val stopIdx = tailSnippet.indexOf("</signer>", ignoreCase = true).let { if (it > 0) it else tailSnippet.length }
+      seinfoRegex.find(tailSnippet.substring(0, stopIdx))?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }?.let { se ->
+        seinfoHintsBySha.putIfAbsent(sha, se)
+      }
       hexBySha.getOrPut(sha) { mutableListOf() }.add(extractLinePreview(text, match.range.first))
     }
     hexBySha.forEach { (sha, previews) ->
@@ -533,12 +582,14 @@ object OsSignAnalyzerEngine {
     index: Int,
     cert: CertificateDetails,
     members: List<OsScannedArtifact>,
+    seinfoHint: String? = null,
   ): String {
     val dn = cert.subjectDn
     val cnMatch = Regex("""CN=([^,]+)""").find(dn)?.groupValues?.get(1)?.trim()
     val ouMatch = Regex("""OU=([^,]+)""").find(dn)?.groupValues?.get(1)?.trim()
     val base =
       when {
+        !seinfoHint.isNullOrBlank() -> seinfoHint
         !cnMatch.isNullOrBlank() && !cnMatch.equals("Android", ignoreCase = true) -> cnMatch
         !ouMatch.isNullOrBlank() -> ouMatch
         !cnMatch.isNullOrBlank() -> cnMatch

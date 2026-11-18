@@ -22,13 +22,76 @@ data class RootApkCandidate(
   val displayLabel: String,
 )
 
+private enum class RootNamespaceMode {
+  MOUNT_MASTER_LONG,
+  MOUNT_MASTER_SHORT,
+  NSENTER_PID1,
+  PLAIN,
+}
+
 object RootBridge {
+
+  @Volatile
+  private var resolvedMode: RootNamespaceMode? = null
+
+  private fun buildSuProcessBuilder(mode: RootNamespaceMode, script: String): ProcessBuilder {
+    return when (mode) {
+      RootNamespaceMode.MOUNT_MASTER_LONG -> ProcessBuilder("su", "--mount-master", "-c", script)
+      RootNamespaceMode.MOUNT_MASTER_SHORT -> ProcessBuilder("su", "-mm", "-c", script)
+      RootNamespaceMode.NSENTER_PID1 ->
+        ProcessBuilder("su", "-c", "nsenter -t 1 -m -- sh -c ${shellQuote(script)}")
+      RootNamespaceMode.PLAIN -> ProcessBuilder("su", "-c", script)
+    }
+  }
+
+  private fun ensureRootNamespaceMode(): RootNamespaceMode {
+    resolvedMode?.let { return it }
+    val testScript = "id; echo __CNT__=$(ls -1A /data/data 2>/dev/null | wc -l)"
+    var bestMode: RootNamespaceMode = RootNamespaceMode.PLAIN
+    var bestCount = -1
+
+    for (candidate in listOf(
+      RootNamespaceMode.MOUNT_MASTER_LONG,
+      RootNamespaceMode.MOUNT_MASTER_SHORT,
+      RootNamespaceMode.NSENTER_PID1,
+      RootNamespaceMode.PLAIN,
+    )) {
+      val run =
+        runCatching {
+          val p = buildSuProcessBuilder(candidate, testScript).redirectErrorStream(true).start()
+          if (!p.waitFor(4, TimeUnit.SECONDS)) {
+            p.destroyForcibly()
+            return@runCatching null
+          }
+          val out = p.inputStream.bufferedReader().readText()
+          if (p.exitValue() == 0 && out.contains("uid=0")) {
+            val cnt = Regex("""__CNT__=(\d+)""").find(out)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            cnt
+          } else {
+            null
+          }
+        }.getOrNull()
+      if (run != null && run > bestCount) {
+        bestCount = run
+        bestMode = candidate
+      }
+    }
+
+    resolvedMode = bestMode
+    return bestMode
+  }
+
+  private fun startRootScript(script: String): Process {
+    val mode = ensureRootNamespaceMode()
+    return buildSuProcessBuilder(mode, script).redirectErrorStream(true).start()
+  }
 
   suspend fun probeRootAccess(): RootProbeResult =
     withContext(Dispatchers.IO) {
+      resolvedMode = null
       runCatching {
-        val process = ProcessBuilder("su", "-c", "id").redirectErrorStream(true).start()
-        val finished = process.waitFor(4, TimeUnit.SECONDS)
+        val process = startRootScript("id")
+        val finished = process.waitFor(5, TimeUnit.SECONDS)
         if (!finished) {
           process.destroyForcibly()
           return@runCatching RootProbeResult(available = false, error = "su timed out")
@@ -37,7 +100,7 @@ object RootBridge {
         val ok = process.exitValue() == 0 && output.contains("uid=0")
         RootProbeResult(
           available = ok,
-          identity = output,
+          identity = if (ok) "$output (${resolvedMode?.name})" else output,
           error = if (ok) null else output.ifBlank { "Exit code ${process.exitValue()}" },
         )
       }.getOrElse { err ->
@@ -48,15 +111,8 @@ object RootBridge {
   suspend fun listInstalledApksViaRoot(): Result<List<RootApkCandidate>> =
     withContext(Dispatchers.IO) {
       runCatching {
-        val process =
-          ProcessBuilder(
-              "su",
-              "-c",
-              "find /data/app -maxdepth 4 -type f -name 'base.apk' 2>/dev/null | head -n 120",
-            )
-            .redirectErrorStream(false)
-            .start()
-        val finished = process.waitFor(8, TimeUnit.SECONDS)
+        val process = startRootScript("find /data/app -maxdepth 4 -type f -name 'base.apk' 2>/dev/null | head -n 120")
+        val finished = process.waitFor(10, TimeUnit.SECONDS)
         if (!finished) {
           process.destroyForcibly()
           throw IllegalStateException("Root scan timed out.")
@@ -85,27 +141,27 @@ object RootBridge {
       runCatching {
         val normalized = dirPath.trim().ifBlank { "/" }
         val qDir = shellQuote(normalized)
-        // Strict symlink-aware listing without dereferencing symlinks
+        // Strict symlink-aware child listing: never dereference child symlinks
         val script =
           """
           DIR=$qDir
-          [ -d "${'$'}DIR" ] && [ ! -L "${'$'}DIR" ] || { echo "__ERR__:Not a real directory"; exit 1; }
+          [ -d "${'$'}DIR" ] || { echo "__ERR__:Directory not found: ${'$'}DIR"; exit 1; }
           for item in "${'$'}DIR"/* "${'$'}DIR"/.[!.]*; do
-            [ -e "${'$'}item" ] || [ -L "${'$'}item" ] || continue
             name=${'$'}{item##*/}
+            [ "${'$'}name" = "*" ] || [ "${'$'}name" = ".[!.]*" ] && [ ! -e "${'$'}item" ] && [ ! -L "${'$'}item" ] && continue
             if [ -L "${'$'}item" ]; then
               echo "L|0|${'$'}name"
             elif [ -d "${'$'}item" ]; then
               echo "D|0|${'$'}name"
-            else
-              sz=${'$'}(wc -c < "${'$'}item" 2>/dev/null || echo 0)
+            elif [ -e "${'$'}item" ]; then
+              sz=${'$'}(stat -c %s "${'$'}item" 2>/dev/null || wc -c < "${'$'}item" 2>/dev/null || echo 0)
               echo "F|${'$'}sz|${'$'}name"
             fi
           done
           """.trimIndent()
 
-        val process = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-        val finished = process.waitFor(10, TimeUnit.SECONDS)
+        val process = startRootScript(script)
+        val finished = process.waitFor(20, TimeUnit.SECONDS)
         if (!finished) {
           process.destroyForcibly()
           throw IllegalStateException("Root directory listing timed out for $normalized")
@@ -150,7 +206,7 @@ object RootBridge {
       val parentName = File(remotePath).parentFile?.name?.replace(Regex("[^a-zA-Z0-9._-]"), "_") ?: "app"
       val destFile = File(stagingDir, "${parentName}_base.apk")
       val cmd = "cp ${shellQuote(remotePath)} ${shellQuote(destFile.absolutePath)} && chmod 644 ${shellQuote(destFile.absolutePath)}"
-      val process = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+      val process = startRootScript(cmd)
       val finished = process.waitFor(15, TimeUnit.SECONDS)
       if (!finished) {
         process.destroyForcibly()
@@ -167,31 +223,39 @@ object RootBridge {
     withContext(Dispatchers.IO) {
       if (stagingRoot.exists()) stagingRoot.deleteRecursively()
       stagingRoot.mkdirs()
-      val qSrc = shellQuote(remoteDir.trimEnd('/').ifBlank { "/" })
+      val cleanRemote = remoteDir.trim().trimEnd('/').ifBlank { "/" }
+      val qSrc = shellQuote(cleanRemote)
       val qDst = shellQuote(stagingRoot.absolutePath)
-      // Strictly never follow symlinks (-P, ! -type l); copy regular files of interest + preserve relative layout
+      // Strictly never follow symlinks inside traversal (-type l -prune); handle spaces safely via read -r
       val script =
         """
         SRC=$qSrc
         DST=$qDst
-        [ -d "${'$'}SRC" ] && [ ! -L "${'$'}SRC" ] || exit 1
-        cd "${'$'}SRC" || exit 1
+        [ -d "${'$'}SRC" ] || { echo "__ERR__:Directory not found under root: ${'$'}SRC"; exit 1; }
+        cd "${'$'}SRC" || { echo "__ERR__:Cannot enter directory: ${'$'}SRC"; exit 1; }
         COUNT=0
-        for f in ${'$'}(find . -mindepth 1 ! -type l \( -name '*.apk' -o -name '*.apex' -o -name '*.jar' -o -name '*.capex' -o -name '*.xml' -o -name '*.pem' -o -name '*.crt' -o -name '*.cer' -o -name '*.der' -o -name '*.conf' -o -name '*.json' -o -name '*.txt' \)); do
+        find . -mindepth 1 -type l -prune -o -type f ! -name '*.appsign.bak' ! -name '*.bak' \( -name '*.apk' -o -name '*.apex' -o -name '*.capex' -o -name '*.jar' -o -name '*.idsig' -o -name '*.xml' -o -name '*.pem' -o -name '*.crt' -o -name '*.cer' -o -name '*.der' -o -name '*.avbpubkey' -o -name '*.pubkey' -o -name '*.conf' -o -name '*.cfg' -o -name '*.json' -o -name '*.txt' -o -name '*.prop' -o -name '*.rc' -o -name '*.policy' -o -name '*.info' \) -print | while IFS= read -r f; do
           rel="${'$'}{f#./}"
-          mkdir -p "${'$'}DST/${'$'}(dirname "${'$'}rel")"
-          cp -f "${'$'}f" "${'$'}DST/${'$'}rel" && chmod 644 "${'$'}DST/${'$'}rel"
-          COUNT=${'$'}((COUNT+1))
+          dir_rel="${'$'}(dirname "${'$'}rel")"
+          mkdir -p "${'$'}DST/${'$'}dir_rel"
+          if cp -f "${'$'}f" "${'$'}DST/${'$'}rel"; then
+            chmod 644 "${'$'}DST/${'$'}rel" 2>/dev/null || true
+            COUNT=${'$'}((COUNT+1))
+          fi
         done
-        echo "STAGED=${'$'}COUNT"
+        echo "STAGED=1"
         """.trimIndent()
-      val process = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-      val finished = process.waitFor(120, TimeUnit.SECONDS)
+      val process = startRootScript(script)
+      val finished = process.waitFor(180, TimeUnit.SECONDS)
       if (!finished) {
         process.destroyForcibly()
-        throw IllegalStateException("Root staging timed out for $remoteDir")
+        throw IllegalStateException("Root staging timed out for $cleanRemote")
       }
       val output = process.inputStream.bufferedReader().readText()
+      val errLine = output.lineSequence().firstOrNull { it.startsWith("__ERR__:") }
+      if (errLine != null) {
+        throw IllegalStateException(errLine.removePrefix("__ERR__:"))
+      }
       if (process.exitValue() != 0) {
         throw IllegalStateException("Root staging failed: $output")
       }
@@ -220,21 +284,24 @@ object RootBridge {
         val qBak = shellQuote(remoteBak)
         val qTmp = shellQuote("${remoteOrig}.appsign.tmp")
 
-        // Skip symlinks strictly; preserve mode/owner
+        // Skip symlinks strictly; preserve mode, owner, and SELinux context cleanly on toybox/Android
         commands.appendLine("if [ ! -L $qOrig ] && [ -f $qOrig ]; then")
         if (createBackups) {
           commands.appendLine("  if [ ! -e $qBak ] && [ ! -L $qBak ]; then cp -p $qOrig $qBak; fi")
           backupEntries += OsBackupEntry(originalPath = remoteOrig, backupPath = remoteBak, kind = "ROOT_FILE")
         }
+        commands.appendLine("  MODE=$(stat -c %a $qOrig 2>/dev/null || echo 644)")
+        commands.appendLine("  OWNER=$(stat -c %u:%g $qOrig 2>/dev/null || echo '')")
         commands.appendLine("  cp $qStaged $qTmp")
-        commands.appendLine("  chmod --reference=$qOrig $qTmp 2>/dev/null || chmod 644 $qTmp")
-        commands.appendLine("  chown --reference=$qOrig $qTmp 2>/dev/null || true")
+        commands.appendLine("  chmod \"\$MODE\" $qTmp 2>/dev/null || chmod 644 $qTmp")
+        commands.appendLine("  [ -n \"\$OWNER\" ] && chown \"\$OWNER\" $qTmp 2>/dev/null || true")
+        commands.appendLine("  chcon --reference=$qOrig $qTmp 2>/dev/null || true")
         commands.appendLine("  mv -f $qTmp $qOrig")
         commands.appendLine("fi")
       }
 
-      val process = ProcessBuilder("su", "-c", commands.toString()).redirectErrorStream(true).start()
-      val finished = process.waitFor(120, TimeUnit.SECONDS)
+      val process = startRootScript(commands.toString())
+      val finished = process.waitFor(180, TimeUnit.SECONDS)
       if (!finished) {
         process.destroyForcibly()
         throw IllegalStateException("Root write-back timed out.")
@@ -268,8 +335,8 @@ object RootBridge {
           appendLine("fi")
         }
       }
-      val process = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-      process.waitFor(60, TimeUnit.SECONDS)
+      val process = startRootScript(script)
+      process.waitFor(90, TimeUnit.SECONDS)
       for (line in process.inputStream.bufferedReader().readLines()) {
         if (line.startsWith("RESTORED:")) restored++
         if (line.startsWith("ERR:")) errors += line.removePrefix("ERR:")
@@ -289,8 +356,8 @@ object RootBridge {
           appendLine("fi")
         }
       }
-      val process = ProcessBuilder("su", "-c", script).redirectErrorStream(true).start()
-      process.waitFor(60, TimeUnit.SECONDS)
+      val process = startRootScript(script)
+      process.waitFor(90, TimeUnit.SECONDS)
       for (line in process.inputStream.bufferedReader().readLines()) {
         if (line.startsWith("DEL:")) deleted++
         if (line.startsWith("ERR:")) errors += line.removePrefix("ERR:")

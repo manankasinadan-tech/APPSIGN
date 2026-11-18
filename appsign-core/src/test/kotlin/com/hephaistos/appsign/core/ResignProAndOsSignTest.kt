@@ -341,4 +341,223 @@ class ResignProAndOsSignTest {
       tmpDir.deleteRecursively()
     }
   }
+
+  /**
+   * Builds a binary AndroidManifest.xml with android:minSdkVersion compiled cleanly so
+   * com.android.apksig reads the real minSdkVersion (>= 28) instead of throwing MinSdkVersionException.
+   */
+  private fun buildBinaryManifestWithMinSdk(minSdk: Int): ByteArray {
+    fun utf16PoolEntry(s: String): ByteArray {
+      val chars = s.toCharArray()
+      val buf = java.nio.ByteBuffer.allocate(2 + chars.size * 2 + 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      buf.putShort(chars.size.toShort())
+      for (c in chars) buf.putShort(c.code.toShort())
+      buf.putShort(0)
+      return buf.array()
+    }
+
+    val strings = listOf(
+      "minSdkVersion",
+      "http://schemas.android.com/apk/res/android",
+      "manifest",
+      "uses-sdk",
+    )
+    val encodedStrings = strings.map { utf16PoolEntry(it) }
+    val offsets = IntArray(strings.size)
+    var curOff = 0
+    for (i in encodedStrings.indices) {
+      offsets[i] = curOff
+      curOff += encodedStrings[i].size
+    }
+    val rawStringsLen = curOff
+    val paddedStringsLen = (rawStringsLen + 3) and 3.inv()
+    val spHeaderSize = 28
+    val stringsStart = spHeaderSize + strings.size * 4
+    val spSize = stringsStart + paddedStringsLen
+    val spBuf = java.nio.ByteBuffer.allocate(spSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    spBuf.putShort(0x0001).putShort(spHeaderSize.toShort()).putInt(spSize)
+    spBuf.putInt(strings.size).putInt(0).putInt(0).putInt(stringsStart).putInt(0)
+    for (o in offsets) spBuf.putInt(o)
+    for (b in encodedStrings) spBuf.put(b)
+    while (spBuf.position() < spSize) spBuf.put(0)
+
+    // Resource Map mapping string 0 ("minSdkVersion") -> android.R.attr.minSdkVersion (0x0101020c)
+    val resMapBuf = java.nio.ByteBuffer.allocate(12).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    resMapBuf.putShort(0x0180.toShort()).putShort(8).putInt(12).putInt(0x0101020c)
+
+    fun startElem(nameIdx: Int, hasMinSdkAttr: Boolean): ByteArray {
+      val attrCount = if (hasMinSdkAttr) 1 else 0
+      val size = 36 + attrCount * 20
+      val b = java.nio.ByteBuffer.allocate(size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      b.putShort(0x0102).putShort(16).putInt(size).putInt(1).putInt(-1)
+      b.putInt(-1).putInt(nameIdx).putShort(20).putShort(20)
+      b.putShort(attrCount.toShort()).putShort(0).putShort(0).putShort(0)
+      if (hasMinSdkAttr) {
+        b.putInt(1) // ns -> android
+        b.putInt(0) // name -> minSdkVersion
+        b.putInt(-1) // rawValue
+        b.putShort(8).put(0).put(0x10) // TypedValue TYPE_INT_DEC
+        b.putInt(minSdk)
+      }
+      return b.array()
+    }
+
+    fun endElem(nameIdx: Int): ByteArray {
+      val b = java.nio.ByteBuffer.allocate(24).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+      b.putShort(0x0103).putShort(16).putInt(24).putInt(1).putInt(-1)
+      b.putInt(-1).putInt(nameIdx)
+      return b.array()
+    }
+
+    val chunks = listOf(
+      spBuf.array(),
+      resMapBuf.array(),
+      startElem(2, false),
+      startElem(3, true),
+      endElem(3),
+      endElem(2),
+    )
+    val totalSize = 8 + chunks.sumOf { it.size }
+    val out = java.nio.ByteBuffer.allocate(totalSize).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+    out.putShort(0x0003).putShort(8).putInt(totalSize)
+    for (c in chunks) out.put(c)
+    return out.array()
+  }
+
+  private fun createHighMinSdkApk(file: File, minSdk: Int = 30, tag: String = "rom") {
+    file.parentFile?.mkdirs()
+    ZipOutputStream(FileOutputStream(file)).use { zos ->
+      zos.putNextEntry(ZipEntry("AndroidManifest.xml"))
+      zos.write(buildBinaryManifestWithMinSdk(minSdk))
+      zos.closeEntry()
+      zos.putNextEntry(ZipEntry("classes.dex"))
+      zos.write("dex\n035\u0000$tag".toByteArray(Charsets.UTF_8))
+      zos.closeEntry()
+    }
+  }
+
+  @Test
+  fun `resignPro and osSign infallibly detect and reproduce V1 V2 V3 on minSdk 30 APKs and preserve mixed-scheme grouping`() {
+    val tmpDir = Files.createTempDirectory("high_sdk_schemes_").toFile()
+    try {
+      val platKey = AskKeyManager.unlockAsk(
+        AskKeyManager.createAsk(
+          CreateAskOptions(alias = "plat30", algorithm = KeyAlgorithm.RSA_2048, commonName = "Platform30")
+        ),
+        null,
+      )
+      val mediaKey = AskKeyManager.unlockAsk(
+        AskKeyManager.createAsk(
+          CreateAskOptions(alias = "media30", algorithm = KeyAlgorithm.EC_P256, commonName = "Media30")
+        ),
+        null,
+      )
+
+      // 1. APK1 with minSdk=30 signed with V1 + V2 + V3
+      val apk1Src = File(tmpDir, "src1.apk").also { createHighMinSdkApk(it, minSdk = 30, tag = "ui") }
+      val apk1Signed = File(tmpDir, "rom/priv-app/SystemUI/SystemUI.apk")
+      assertTrue(
+        ApkSignerEngine.resign(
+          apk1Src,
+          apk1Signed,
+          platKey,
+          SigningOptions(enableV1 = true, enableV2 = true, enableV3 = true, minSdkVersion = 30),
+        ).success
+      )
+
+      // 2. APK2 with minSdk=30 signed with V1 + V2 ONLY (same platKey group!)
+      val apk2Src = File(tmpDir, "src2.apk").also { createHighMinSdkApk(it, minSdk = 30, tag = "settings") }
+      val apk2Signed = File(tmpDir, "rom/priv-app/Settings/Settings.apk")
+      assertTrue(
+        ApkSignerEngine.resign(
+          apk2Src,
+          apk2Signed,
+          platKey,
+          SigningOptions(enableV1 = true, enableV2 = true, enableV3 = false, minSdkVersion = 30),
+        ).success
+      )
+
+      // 3. APK3 with minSdk=30 signed with V2 + V3 ONLY (mediaKey group)
+      val apk3Src = File(tmpDir, "src3.apk").also { createHighMinSdkApk(it, minSdk = 30, tag = "media") }
+      val apk3Signed = File(tmpDir, "rom/app/MediaApp/MediaApp.apk")
+      assertTrue(
+        ApkSignerEngine.resign(
+          apk3Src,
+          apk3Signed,
+          mediaKey,
+          SigningOptions(enableV1 = false, enableV2 = true, enableV3 = true, minSdkVersion = 30),
+        ).success
+      )
+
+      // Verify ApkVerifierEngine & ResignProEngine infallibly detect V1+V2+V3 even though minSdk=30!
+      val proProfile = ResignProEngine.analyzeTarget(apk1Signed)
+      assertEquals(30, proProfile.minSdkVersion)
+      assertTrue("V1 must be detected on minSdk=30 APK", proProfile.enableV1)
+      assertTrue("V2 must be detected on minSdk=30 APK", proProfile.enableV2)
+      assertTrue("V3 must be detected on minSdk=30 APK", proProfile.enableV3)
+      assertTrue(proProfile.verificationReport.schemeResults.first { it.scheme == SignatureSchemeVersion.V1 }.verified)
+      assertTrue(proProfile.verificationReport.schemeResults.first { it.scheme == SignatureSchemeVersion.V2 }.verified)
+      assertTrue(proProfile.verificationReport.schemeResults.first { it.scheme == SignatureSchemeVersion.V3 }.verified)
+
+      // Run RESIGNPRO and confirm output reproduces V1 + V2 + V3
+      val proOut = File(tmpDir, "pro-out.apk")
+      val proRes = ResignProEngine.resignPro(
+        inputApk = apk1Signed,
+        outputApk = proOut,
+        identities = listOf(IdentityInput(alias = "new_plat", commonName = "CustomPlat30")),
+        askOutputDir = File(tmpDir, "ask_pro"),
+      )
+      assertTrue(proRes.resignResult.success)
+      val proOutReport = ApkVerifierEngine.verify(proOut)
+      assertTrue(proOutReport.schemeResults.first { it.scheme == SignatureSchemeVersion.V1 }.present)
+      assertTrue(proOutReport.schemeResults.first { it.scheme == SignatureSchemeVersion.V2 }.present)
+      assertTrue(proOutReport.schemeResults.first { it.scheme == SignatureSchemeVersion.V3 }.present)
+
+      // Run OS Sign VERIFY + RESIGNER on rom/ and confirm grouping & per-APK schemes are faithfully preserved!
+      val romDir = File(tmpDir, "rom")
+      val inspection = OsSignAnalyzerEngine.analyzeDirectory(romDir)
+      assertEquals(2, inspection.groups.size)
+      val uiArt = inspection.groups.flatMap { it.artifacts }.first { it.relativePath.endsWith("SystemUI.apk") }
+      val setArt = inspection.groups.flatMap { it.artifacts }.first { it.relativePath.endsWith("Settings.apk") }
+      val medArt = inspection.groups.flatMap { it.artifacts }.first { it.relativePath.endsWith("MediaApp.apk") }
+      assertEquals(setOf(SignatureSchemeVersion.V1, SignatureSchemeVersion.V2, SignatureSchemeVersion.V3), uiArt.schemes.toSet())
+      assertEquals(setOf(SignatureSchemeVersion.V1, SignatureSchemeVersion.V2), setArt.schemes.toSet())
+      assertEquals(setOf(SignatureSchemeVersion.V2, SignatureSchemeVersion.V3), medArt.schemes.toSet())
+
+      val osResign = OsSignResignEngine.executeResign(
+        inspection = inspection,
+        plan = OsResignPlan(
+          strategy = OsResignKeyStrategy.CREATE_WITH_IDENTITIES,
+          identityPerGroup = inspection.groups.associate { g ->
+            g.groupId to IdentityInput(alias = "id_${g.groupId}", commonName = "Resigned ${g.label}")
+          },
+          createBackups = false,
+        ),
+        askOutputDir = File(tmpDir, "ask_os"),
+      )
+      assertEquals(3, osResign.totalSucceeded)
+
+      // Post-verify each resigned ROM APK kept its exact original scheme mask & original grouping!
+      val uiPost = ApkVerifierEngine.verify(apk1Signed)
+      val setPost = ApkVerifierEngine.verify(apk2Signed)
+      val medPost = ApkVerifierEngine.verify(apk3Signed)
+      assertEquals(
+        setOf(SignatureSchemeVersion.V1, SignatureSchemeVersion.V2, SignatureSchemeVersion.V3),
+        uiPost.schemeResults.filter { it.present }.map { it.scheme }.toSet(),
+      )
+      assertEquals(
+        setOf(SignatureSchemeVersion.V1, SignatureSchemeVersion.V2),
+        setPost.schemeResults.filter { it.present }.map { it.scheme }.toSet(),
+      )
+      assertEquals(
+        setOf(SignatureSchemeVersion.V2, SignatureSchemeVersion.V3),
+        medPost.schemeResults.filter { it.present }.map { it.scheme }.toSet(),
+      )
+      // SystemUI & Settings still share the same new platform key, distinct from MediaApp!
+      assertEquals(uiPost.allUniqueSigners.first().fingerprints.sha256, setPost.allUniqueSigners.first().fingerprints.sha256)
+      assertNotEquals(uiPost.allUniqueSigners.first().fingerprints.sha256, medPost.allUniqueSigners.first().fingerprints.sha256)
+    } finally {
+      tmpDir.deleteRecursively()
+    }
+  }
 }

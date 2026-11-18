@@ -102,16 +102,18 @@ object ResignProEngine {
     )
   }
 
-  fun buildMatchedSigningOptions(profile: TargetSignatureProfile): SigningOptions =
-    SigningOptions(
+  fun buildMatchedSigningOptions(profile: TargetSignatureProfile): SigningOptions {
+    val allowV3 = profile.signerProfiles.size <= 1 || profile.hasKeyRotation
+    return SigningOptions(
       enableV1 = profile.enableV1,
       enableV2 = profile.enableV2,
-      enableV3 = profile.enableV3,
-      enableV31 = profile.enableV31,
+      enableV3 = profile.enableV3 && allowV3,
+      enableV31 = profile.enableV31 && allowV3,
       enableV4 = profile.enableV4,
       alignBeforeSign = profile.wasZipAligned || true,
       minSdkVersion = profile.minSdkVersion,
     )
+  }
 
   fun generateMatchedAskKey(
     signerProfile: SignerCryptographicProfile,
@@ -171,7 +173,14 @@ object ResignProEngine {
       askPaths += askFile.absolutePath
     }
 
-    val resignRes = ApkSignerEngine.resignWithSigners(inputApk, outputApk, unlockedSigners, options)
+    val resignRes =
+      ApkSignerEngine.resignWithSigners(
+        inputApk = inputApk,
+        outputApk = outputApk,
+        signers = unlockedSigners,
+        options = options,
+        useKeyRotationLineage = profile.hasKeyRotation && unlockedSigners.size >= 2,
+      )
     return ResignProResult(
       targetProfile = profile,
       generatedAskContainers = containers.map { AskKeyManager.inspectAsk(it) },
