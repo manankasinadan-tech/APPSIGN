@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
+import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
@@ -48,6 +50,7 @@ import com.hephaistos.appsign.android.ui.screens.DocumentationScreen
 import com.hephaistos.appsign.android.ui.screens.HistoryScreen
 import com.hephaistos.appsign.android.ui.screens.HomeScreen
 import com.hephaistos.appsign.android.ui.screens.KeyManagerScreen
+import com.hephaistos.appsign.android.ui.screens.OsSignScreen
 import com.hephaistos.appsign.android.ui.screens.ResignScreen
 import com.hephaistos.appsign.android.ui.screens.SettingsScreen
 import com.hephaistos.appsign.android.ui.screens.VerifyScreen
@@ -57,6 +60,7 @@ import kotlinx.serialization.Serializable
 @Serializable data object HomeRoute
 @Serializable data object VerifyRoute
 @Serializable data object ResignRoute
+@Serializable data object OsSignRoute
 @Serializable data object KeyManagerRoute
 @Serializable data object HistoryRoute
 @Serializable data object DocumentationRoute
@@ -83,6 +87,7 @@ fun AppsignApp(viewModel: AppsignViewModel) {
   val verifyState by viewModel.verifyState.collectAsStateWithLifecycle()
   val resignState by viewModel.resignState.collectAsStateWithLifecycle()
   val keyUiState by viewModel.keyUiState.collectAsStateWithLifecycle()
+  val osSignState by viewModel.osSignState.collectAsStateWithLifecycle()
   val hasStorage by viewModel.hasStoragePermission.collectAsStateWithLifecycle()
   val rootProbe by viewModel.rootProbe.collectAsStateWithLifecycle()
 
@@ -98,6 +103,7 @@ fun AppsignApp(viewModel: AppsignViewModel) {
   val railNavItems =
     primaryNavItems +
       listOf(
+        NavItem(OsSignRoute, strings.navOsSign, Icons.Rounded.AdminPanelSettings, Icons.Outlined.AdminPanelSettings, "nav_os_sign"),
         NavItem(HistoryRoute, strings.navHistory, Icons.Rounded.History, Icons.Outlined.History, "nav_history"),
         NavItem(DocumentationRoute, strings.navDocs, Icons.AutoMirrored.Rounded.MenuBook, Icons.AutoMirrored.Outlined.MenuBook, "nav_docs"),
       )
@@ -167,6 +173,7 @@ fun AppsignApp(viewModel: AppsignViewModel) {
                 recentHistory = history,
                 onOpenVerify = { navigateSingleTop(VerifyRoute) },
                 onOpenResign = { navigateSingleTop(ResignRoute) },
+                onOpenOsSign = { navigateSingleTop(OsSignRoute) },
                 onOpenKeys = { navigateSingleTop(KeyManagerRoute) },
                 onOpenHistory = { navigateSingleTop(HistoryRoute) },
                 onOpenDocs = { navigateSingleTop(DocumentationRoute) },
@@ -202,8 +209,27 @@ fun AppsignApp(viewModel: AppsignViewModel) {
                 onSetOutputPath = viewModel::setResignOutputFolderPath,
                 onSetOutputSafTree = viewModel::setResignOutputSafTree,
                 onStartResign = { pw -> viewModel.startResign(pw) },
+                onSetProMode = viewModel::setResignProMode,
+                onAnalyzeProTarget = viewModel::analyzeTargetForPro,
+                onStartResignPro = viewModel::startResignPro,
                 onDismissPassword = viewModel::dismissResignPasswordPrompt,
                 onClearSelection = viewModel::clearResignSelection,
+                onOpenSettings = { navigateSingleTop(SettingsRoute) },
+              )
+            }
+            composable<OsSignRoute> {
+              OsSignScreen(
+                state = osSignState,
+                managedKeys = managedKeys,
+                defaultBrowseDir = settings.defaultBrowseDir,
+                rootEnabled = settings.rootAccessEnabled,
+                onSetDirectory = viewModel::setOsTargetDirectory,
+                onVerify = viewModel::runOsVerify,
+                onOpenStrategyDialog = viewModel::openOsStrategyDialog,
+                onDismissStrategyDialog = viewModel::dismissOsStrategyDialog,
+                onExecuteResign = viewModel::runOsResign,
+                onRestoreBackups = viewModel::restoreOsBackups,
+                onDeleteBackups = viewModel::deleteOsBackups,
                 onOpenSettings = { navigateSingleTop(SettingsRoute) },
               )
             }

@@ -59,6 +59,7 @@ fun HomeScreen(
   recentHistory: List<OperationHistoryEntity>,
   onOpenVerify: () -> Unit,
   onOpenResign: () -> Unit,
+  onOpenOsSign: () -> Unit,
   onOpenKeys: () -> Unit,
   onOpenHistory: () -> Unit,
   onOpenDocs: () -> Unit,
@@ -140,6 +141,17 @@ fun HomeScreen(
         accentColor = MaterialTheme.colorScheme.secondary,
         testTag = "home_resign_card",
         onClick = onOpenResign,
+      )
+
+      Spacer(Modifier.height(14.dp))
+
+      HeroOperationCard(
+        title = strings.osSignHeroTitle,
+        description = strings.osSignHeroDesc,
+        icon = Icons.Rounded.AdminPanelSettings,
+        accentColor = MaterialTheme.colorScheme.tertiary,
+        testTag = "home_os_sign_card",
+        onClick = onOpenOsSign,
       )
 
       Spacer(Modifier.height(24.dp))

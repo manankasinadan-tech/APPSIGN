@@ -150,6 +150,41 @@ data class AppsignStrings(
   val docsTitle: String,
   val docsSearchHint: String,
   val docSections: List<DocSection>,
+  // RESIGNPRO
+  val resignModeStandard: String,
+  val resignModePro: String,
+  val resignProDesc: String,
+  val resignProAnalyzeBtn: String,
+  val resignProProfileTitle: String,
+  val resignProIdentityTitle: String,
+  val resignProSavedAskTitle: String,
+  val resignProRunBtn: String,
+  // OS Sign
+  val navOsSign: String,
+  val osSignHeroTitle: String,
+  val osSignHeroDesc: String,
+  val osSignScreenTitle: String,
+  val osRootExplorerTitle: String,
+  val osSymlinkIgnoredShort: String,
+  val osSelectFolderHint: String,
+  val osVerifyBtn: String,
+  val osResignBtn: String,
+  val osBackupToggle: String,
+  val osRestoreBakBtn: String,
+  val osDeleteBakBtn: String,
+  val osGroupsDashboardTitle: String,
+  val osPermRefsTitle: String,
+  val osTrustChainTitle: String,
+  val osPreservedTitle: String,
+  val osStrategyDialogTitle: String,
+  val osStrategyIdentities: String,
+  val osStrategyIdentitiesDesc: String,
+  val osStrategyExisting: String,
+  val osStrategyExistingDesc: String,
+  val osStrategyClone: String,
+  val osStrategyCloneDesc: String,
+  val osMissingKeyMapping: String,
+  val osConfirmResign: String,
 )
 
 val LocalAppsignStrings = staticCompositionLocalOf { englishStrings() }
@@ -297,6 +332,41 @@ fun frenchStrings(): AppsignStrings =
     docsTitle = "Documentation hors ligne",
     docsSearchHint = "Rechercher (ASK, v4, CLI, Termux...)",
     docSections = frenchDocSections(),
+    resignModeStandard = "Standard",
+    resignModePro = "RESIGNPRO",
+    resignProDesc =
+      "Analyse automatiquement la signature et la clé cible (schémas v1–v4, algorithme, taille RSA/courbe EC, validité), génère une clé .ask identique à partir de votre seule identité, puis resigne fidèlement.",
+    resignProAnalyzeBtn = "Analyser la cible",
+    resignProProfileTitle = "Profil cryptographique détecté sur la cible",
+    resignProIdentityTitle = "Nouvelle identité cryptographique (rien d'autre à saisir)",
+    resignProSavedAskTitle = "Clé(s) .ask générée(s) & enregistrée(s)",
+    resignProRunBtn = "Générer .ask & Resigner PRO",
+    navOsSign = "OS Sign",
+    osSignHeroTitle = "OS SIGN",
+    osSignHeroDesc =
+      "Inspecter et resigner une partition déballée ou un GSI (APK, APEX, JAR, XML permissions) avec explorateur Root (su), exclusion stricte des liens symboliques et sauvegarde .bak.",
+    osSignScreenTitle = "OS Sign — GSI & Partition",
+    osRootExplorerTitle = "Explorateur dossier système / Root",
+    osSymlinkIgnoredShort = "ignoré",
+    osSelectFolderHint = "Dossier déballé (GSI, /system, /vendor, /data/local...)",
+    osVerifyBtn = "VERIFY",
+    osResignBtn = "RESIGNER",
+    osBackupToggle = "Créer des sauvegardes .appsign.bak avant écriture sur place",
+    osRestoreBakBtn = "Restaurer (.bak)",
+    osDeleteBakBtn = "Supprimer .bak",
+    osGroupsDashboardTitle = "Groupes de signatures détectés (chaîne de clés)",
+    osPermRefsTitle = "Références de certificats & permissions XML/PEM",
+    osTrustChainTitle = "Organisation & chaîne de confiance",
+    osPreservedTitle = "Fichiers non signés / préservés intacts",
+    osStrategyDialogTitle = "Choisir la stratégie de clés OS Sign",
+    osStrategyIdentities = "1. Nouvelles clés (identités uniquement)",
+    osStrategyIdentitiesDesc = "Reproduit les paramètres exacts de chaque groupe avec de nouvelles identités et enregistre en .ask.",
+    osStrategyExisting = "2. Utiliser des clés .ask existantes",
+    osStrategyExistingDesc = "Associer une clé .ask déjà enregistrée à chaque groupe détecté.",
+    osStrategyClone = "3. Cloner les clés détectées",
+    osStrategyCloneDesc = "Recrée de nouvelles paires .ask en conservant exactement les identités X.509 et paramètres de la cible.",
+    osMissingKeyMapping = "Associez une clé .ask à chaque groupe.",
+    osConfirmResign = "Lancer RESIGNER",
   )
 
 fun englishStrings(): AppsignStrings =
@@ -436,6 +506,41 @@ fun englishStrings(): AppsignStrings =
     docsTitle = "Offline Documentation",
     docsSearchHint = "Search (ASK, v4, CLI, Termux...)",
     docSections = englishDocSections(),
+    resignModeStandard = "Standard",
+    resignModePro = "RESIGNPRO",
+    resignProDesc =
+      "Deep-inspects the target APK's cryptographic setup (v1–v4 schemes, key algorithm, exact RSA bits / EC curve, validity), creates matching .ask key(s) from identity fields only, and faithfully resigns.",
+    resignProAnalyzeBtn = "Analyze Target",
+    resignProProfileTitle = "Detected Target Cryptographic Profile",
+    resignProIdentityTitle = "New Cryptographic Identity (only input required)",
+    resignProSavedAskTitle = "Generated & Saved .ask Key(s)",
+    resignProRunBtn = "Generate .ask & RESIGNPRO",
+    navOsSign = "OS Sign",
+    osSignHeroTitle = "OS SIGN",
+    osSignHeroDesc =
+      "Inspect and resign unpacked GSI or Android partitions (APK, APEX, JAR, permission XML/PEM) with a Root explorer (su), strict symlink exclusion, and .bak recovery.",
+    osSignScreenTitle = "OS Sign — GSI & Partition",
+    osRootExplorerTitle = "System / Root Folder Explorer",
+    osSymlinkIgnoredShort = "ignored",
+    osSelectFolderHint = "Unpacked folder (GSI, /system, /vendor, /data/local...)",
+    osVerifyBtn = "VERIFY",
+    osResignBtn = "RESIGN",
+    osBackupToggle = "Create .appsign.bak backups before in-place overwrite",
+    osRestoreBakBtn = "Restore (.bak)",
+    osDeleteBakBtn = "Delete .bak",
+    osGroupsDashboardTitle = "Detected Signature Groups (Key Chains)",
+    osPermRefsTitle = "Permission & Certificate References (XML/PEM)",
+    osTrustChainTitle = "Trust Chain & Architecture Summary",
+    osPreservedTitle = "Preserved Unsigned / Non-Impacting Files",
+    osStrategyDialogTitle = "Choose OS Sign Key Strategy",
+    osStrategyIdentities = "1. New Keys (Identities Only)",
+    osStrategyIdentitiesDesc = "Clones each group's exact crypto parameters with custom identities and saves .ask containers.",
+    osStrategyExisting = "2. Use Existing .ask Keys",
+    osStrategyExistingDesc = "Assign an already registered .ask key to each detected signature group.",
+    osStrategyClone = "3. Clone Detected Keys",
+    osStrategyCloneDesc = "Generates new .ask containers keeping the exact X.509 DN identities and crypto parameters of the target.",
+    osMissingKeyMapping = "Please assign an .ask key to every detected group.",
+    osConfirmResign = "Start RESIGN",
   )
 
 private fun frenchDocSections(): List<DocSection> =
@@ -482,10 +587,19 @@ private fun frenchDocSections(): List<DocSection> =
         "appsign verify app.apk\n" +
           "appsign verify *.apk --json\n" +
           "appsign resign app.apk --key mykey.ask --pass secret\n" +
-          "appsign resign *.apk --keystore release.jks --output signed/\n" +
+          "appsign resign-pro target.apk --cn \"Mon Identité\" --ask-dir keys/\n" +
+          "appsign os-sign verify /data/local/gsi_unpacked\n" +
+          "appsign os-sign resign /data/local/gsi_unpacked --strategy clone\n" +
+          "appsign os-sign restore manifest.json\n" +
           "appsign key create --alias release --alg rsa2048 --open\n" +
-          "appsign key inspect mykey.ask\n" +
-          "appsign key export mykey.ask --format p12 --out mykey.p12",
+          "appsign key inspect mykey.ask",
+    ),
+    DocSection(
+      title = "6. RESIGNPRO & OS Sign (GSI / Partition)",
+      summary = "Clonage cryptographique fidèle et resignature système sans liens symboliques.",
+      body =
+        "• RESIGNPRO détecte la taille/courbe exacte, les schémas et les multi-signataires d'un APK cible ; vous ne saisissez que les identités et APPSIGN crée la clé .ask correspondante.\n" +
+          "• OS Sign explore n'importe quel dossier (y compris /data/data ou /data/local via su), ignore strictement tous les liens symboliques, regroupe les APK/APEX/JAR par clé partagée, détecte les certificats hex/PEM/empreintes dans les XML/configs, resigne sur place avec sauvegarde .appsign.bak, et propose Restaurer ou Supprimer .bak.",
     ),
   )
 
@@ -531,9 +645,18 @@ private fun englishDocSections(): List<DocSection> =
         "appsign verify app.apk\n" +
           "appsign verify *.apk --json\n" +
           "appsign resign app.apk --key mykey.ask --pass secret\n" +
-          "appsign resign *.apk --keystore release.jks --output signed/\n" +
+          "appsign resign-pro target.apk --cn \"My Identity\" --ask-dir keys/\n" +
+          "appsign os-sign verify /data/local/gsi_unpacked\n" +
+          "appsign os-sign resign /data/local/gsi_unpacked --strategy clone\n" +
+          "appsign os-sign restore manifest.json\n" +
           "appsign key create --alias release --alg rsa2048 --open\n" +
-          "appsign key inspect mykey.ask\n" +
-          "appsign key export mykey.ask --format p12 --out mykey.p12",
+          "appsign key inspect mykey.ask",
+    ),
+    DocSection(
+      title = "6. RESIGNPRO & OS Sign (GSI / Partition)",
+      summary = "Faithful crypto replication and symlink-safe partition resigning.",
+      body =
+        "• RESIGNPRO inspects the target APK's exact schemes, algorithm, key bit length/curve, and validity; enter identities only and APPSIGN generates matching .ask keys.\n" +
+          "• OS Sign browses any directory (including /data/data or /data/local via su), strictly skips all symbolic links, clusters APKs/APEX/JARs by shared signer, dynamically locates XML/PEM/fingerprint cert refs, resigns in-place with .appsign.bak safety backups, and exposes Restore / Delete .bak actions.",
     ),
   )

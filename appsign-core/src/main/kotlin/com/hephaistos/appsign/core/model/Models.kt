@@ -17,7 +17,16 @@ enum class KeyAlgorithm(val displayName: String, val keyAlg: String, val keySize
   RSA_4096("RSA 4096-bit", "RSA", 4096, "SHA512withRSA"),
   EC_P256("ECDSA P-256", "EC", 256, "SHA256withECDSA"),
   EC_P384("ECDSA P-384", "EC", 384, "SHA384withECDSA"),
+  EC_P521("ECDSA P-521", "EC", 521, "SHA512withECDSA"),
 }
+
+@Serializable
+data class ExactKeySpec(
+  val keyAlgorithm: String,
+  val keySizeBits: Int,
+  val sigAlgName: String,
+  val ecCurveName: String? = null,
+)
 
 @Serializable
 enum class SignatureSchemeVersion(val label: String) {

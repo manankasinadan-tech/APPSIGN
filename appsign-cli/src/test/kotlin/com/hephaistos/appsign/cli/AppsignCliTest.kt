@@ -90,6 +90,80 @@ class AppsignCliTest {
         runCli("verify", File(outDir, "*.apk").absolutePath, "--json")
       assertEquals("Output: $verifyOut", ExitCodes.OK, verifyCode)
       assertTrue(verifyOut.contains("\"verified\": true"))
+
+      // RESIGNPRO on signed app1
+      val signedApp1 = File(outDir, "app1-signed.apk")
+      val proOutApk = File(tmpDir, "app1-pro.apk")
+      val proAskDir = File(tmpDir, "pro_keys")
+      val (proCode, proOut) =
+        runCli(
+          "resign-pro",
+          signedApp1.absolutePath,
+          "--alias",
+          "pro-id",
+          "--cn",
+          "Pro Tester",
+          "--ask-dir",
+          proAskDir.absolutePath,
+          "--output",
+          proOutApk.absolutePath,
+          "--json",
+        )
+      assertEquals("Pro output: $proOut", ExitCodes.OK, proCode)
+      assertTrue(proOutApk.exists())
+      assertTrue(proOut.contains("\"EC\""))
+
+      // OS Sign verify -> resign -> restore -> clean-bak
+      val osDir = File(tmpDir, "os_part").apply { mkdirs() }
+      val osApp = File(osDir, "priv-app/Demo/Demo.apk").apply { parentFile.mkdirs() }
+      signedApp1.copyTo(osApp, overwrite = true)
+      val origBytes = osApp.readBytes()
+
+      val (osVerifyCode, osVerifyOut) = runCli("os-sign", "verify", osDir.absolutePath, "--json")
+      assertEquals("OS verify: $osVerifyOut", ExitCodes.OK, osVerifyCode)
+      assertTrue(osVerifyOut.contains("\"signedArtifactsCount\": 1"))
+
+      val manifestFile = File(tmpDir, "os-manifest.json")
+      val (osResignCode, osResignOut) =
+        runCli(
+          "os-sign",
+          "resign",
+          osDir.absolutePath,
+          "--strategy",
+          "identities",
+          "--cn",
+          "OS Custom",
+          "--ask-dir",
+          File(tmpDir, "os_keys").absolutePath,
+          "--manifest-out",
+          manifestFile.absolutePath,
+          "--json",
+        )
+      assertEquals("OS resign: $osResignOut", ExitCodes.OK, osResignCode)
+      assertTrue(manifestFile.exists())
+      assertTrue(File("${osApp.absolutePath}.appsign.bak").exists())
+
+      val (restoreCode, restoreOut) = runCli("os-sign", "restore", manifestFile.absolutePath)
+      assertEquals("OS restore: $restoreOut", ExitCodes.OK, restoreCode)
+      assertTrue(origBytes.contentEquals(osApp.readBytes()))
+
+      // Re-resign and test clean-bak
+      val (osResign2Code, _) =
+        runCli(
+          "os-sign",
+          "resign",
+          osDir.absolutePath,
+          "--strategy",
+          "clone",
+          "--ask-dir",
+          File(tmpDir, "os_keys_clone").absolutePath,
+          "--manifest-out",
+          manifestFile.absolutePath,
+        )
+      assertEquals(ExitCodes.OK, osResign2Code)
+      val (cleanCode, _) = runCli("os-sign", "clean-bak", manifestFile.absolutePath)
+      assertEquals(ExitCodes.OK, cleanCode)
+      assertEquals(false, File("${osApp.absolutePath}.appsign.bak").exists())
     } finally {
       tmpDir.deleteRecursively()
     }

@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import java.io.File
+import java.nio.file.Files
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -21,6 +22,7 @@ data class FileBrowserEntry(
   val isDirectory: Boolean,
   val sizeBytes: Long,
   val lastModifiedMs: Long,
+  val isSymlink: Boolean = false,
 )
 
 object DeviceStorageHelper {
@@ -86,24 +88,32 @@ object DeviceStorageHelper {
         }
         val children = dir.listFiles() ?: throw IllegalStateException("Permission denied reading $dirPath")
         children
-          .filter { file ->
-            if (directoriesOnly) {
-              file.isDirectory
-            } else if (file.isDirectory) {
+          .map { file ->
+            val isSym = runCatching { Files.isSymbolicLink(file.toPath()) }.getOrDefault(false)
+            val isRealDir = !isSym && file.isDirectory
+            Triple(file, isSym, isRealDir)
+          }
+          .filter { (file, isSym, isRealDir) ->
+            if (isSym) {
+              true // show symlinks flagged as SYMLINK (non-navigable/ignored)
+            } else if (directoriesOnly) {
+              isRealDir
+            } else if (isRealDir) {
               true
             } else {
               allowedExtensions == null ||
                 allowedExtensions.any { ext -> file.extension.equals(ext, ignoreCase = true) }
             }
           }
-          .sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() })
-          .map { file ->
+          .sortedWith(compareBy<Triple<File, Boolean, Boolean>> { !it.third }.thenBy { it.first.name.lowercase() })
+          .map { (file, isSym, isRealDir) ->
             FileBrowserEntry(
               name = file.name,
               path = file.absolutePath,
-              isDirectory = file.isDirectory,
-              sizeBytes = if (file.isFile) file.length() else 0L,
-              lastModifiedMs = file.lastModified(),
+              isDirectory = isRealDir,
+              sizeBytes = if (!isSym && file.isFile) file.length() else 0L,
+              lastModifiedMs = if (!isSym) file.lastModified() else 0L,
+              isSymlink = isSym,
             )
           }
       }

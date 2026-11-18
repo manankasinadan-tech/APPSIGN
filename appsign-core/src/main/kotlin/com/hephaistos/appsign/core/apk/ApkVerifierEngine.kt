@@ -38,15 +38,32 @@ object ApkVerifierEngine {
         }
         builder.build().verify()
       } catch (_: com.android.apksig.apk.MinSdkVersionException) {
-        val fallbackSdk = minSdkOverride ?: 21
-        extraWarnings +=
-          "Could not parse minSdkVersion from AndroidManifest.xml; verified with fallback minSdkVersion=$fallbackSdk."
+        val initialFallback = minSdkOverride ?: 21
         try {
-          val fallbackBuilder = ApkVerifier.Builder(apkFile).setMinCheckedPlatformVersion(fallbackSdk)
-          if (candidateIdsig != null) {
-            fallbackBuilder.setV4SignatureFile(candidateIdsig)
+          fun verifyWithSdk(sdk: Int): ApkVerifier.Result {
+            val b = ApkVerifier.Builder(apkFile).setMinCheckedPlatformVersion(sdk)
+            if (candidateIdsig != null) b.setV4SignatureFile(candidateIdsig)
+            return b.build().verify()
           }
-          fallbackBuilder.build().verify()
+          var resolvedSdk = initialFallback
+          var res = verifyWithSdk(initialFallback)
+          if (
+            minSdkOverride == null &&
+              !res.isVerified &&
+              !res.isVerifiedUsingV1Scheme &&
+              res.v1SchemeSigners.isEmpty() &&
+              (res.v2SchemeSigners.isNotEmpty() || res.v3SchemeSigners.isNotEmpty() || res.v31SchemeSigners.isNotEmpty())
+          ) {
+            val targetSdk = if (res.v2SchemeSigners.isNotEmpty()) 24 else 28
+            val higherRes = verifyWithSdk(targetSdk)
+            if (higherRes.isVerified) {
+              resolvedSdk = targetSdk
+              res = higherRes
+            }
+          }
+          extraWarnings +=
+            "Could not parse minSdkVersion from AndroidManifest.xml; verified with fallback minSdkVersion=$resolvedSdk."
+          res
         } catch (e: Exception) {
           throw ApkOperationException("Failed to verify APK '${apkFile.name}': ${e.message}", e)
         }

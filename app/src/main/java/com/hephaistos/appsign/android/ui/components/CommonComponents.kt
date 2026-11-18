@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -28,13 +31,16 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -420,7 +426,7 @@ fun SdcardExplorerDialog(
                     modifier =
                       Modifier.fillMaxWidth()
                         .minimumInteractiveComponentSize()
-                        .clickable {
+                        .clickable(enabled = !item.isSymlink) {
                           if (item.isDirectory) {
                             currentDir = item.path
                           } else if (!pickFolderMode) {
@@ -431,16 +437,30 @@ fun SdcardExplorerDialog(
                     verticalAlignment = Alignment.CenterVertically,
                   ) {
                     Icon(
-                      imageVector = if (item.isDirectory) Icons.Rounded.Folder else Icons.AutoMirrored.Rounded.InsertDriveFile,
+                      imageVector =
+                        when {
+                          item.isSymlink -> Icons.Rounded.LinkOff
+                          item.isDirectory -> Icons.Rounded.Folder
+                          else -> Icons.AutoMirrored.Rounded.InsertDriveFile
+                        },
                       contentDescription = null,
                       tint =
-                        if (item.isDirectory) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        when {
+                          item.isSymlink -> MaterialTheme.colorScheme.outline
+                          item.isDirectory -> MaterialTheme.colorScheme.primary
+                          else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
                     )
                     Spacer(Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                       Text(item.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                      if (!item.isDirectory) {
+                      if (item.isSymlink) {
+                        Text(
+                          text = "SYMLINK (ignored)",
+                          style = MaterialTheme.typography.labelSmall,
+                          color = MaterialTheme.colorScheme.outline,
+                        )
+                      } else if (!item.isDirectory) {
                         Text(
                           text = "${item.sizeBytes / 1024} KB",
                           style = MaterialTheme.typography.labelSmall,
@@ -448,7 +468,7 @@ fun SdcardExplorerDialog(
                         )
                       }
                     }
-                    if (!item.isDirectory && !pickFolderMode) {
+                    if (!item.isSymlink && !item.isDirectory && !pickFolderMode) {
                       Checkbox(
                         checked = checked,
                         onCheckedChange = {
@@ -550,5 +570,197 @@ fun RootApkPickerDialog(
       }
     },
     confirmButton = { TextButton(onClick = onDismiss) { Text(strings.close) } },
+  )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun RootFolderExplorerDialog(
+  initialDir: String,
+  rootEnabled: Boolean,
+  onOpenSettings: () -> Unit,
+  onSelectFolder: (path: String, viaRoot: Boolean) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val strings = LocalAppsignStrings.current
+  var currentDir by remember {
+    mutableStateOf(initialDir.ifBlank { if (rootEnabled) "/data/local" else "/sdcard" })
+  }
+  var useRootMode by remember { mutableStateOf(rootEnabled) }
+  var entries by remember { mutableStateOf<List<FileBrowserEntry>>(emptyList()) }
+  var loadError by remember { mutableStateOf<String?>(null) }
+  var isLoading by remember { mutableStateOf(true) }
+
+  LaunchedEffect(currentDir, useRootMode) {
+    isLoading = true
+    loadError = null
+    val res =
+      if (useRootMode) {
+        RootBridge.listDirectoryViaRoot(currentDir, directoriesOnly = false)
+      } else {
+        DeviceStorageHelper.listDirectory(currentDir, allowedExtensions = null, directoriesOnly = false)
+      }
+    res
+      .onSuccess { entries = it }
+      .onFailure { err ->
+        // If direct read failed and root wasn't tried yet, check direct availability hint
+        entries = emptyList()
+        loadError = err.message
+      }
+    isLoading = false
+  }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = {
+      Column {
+        Text(strings.osRootExplorerTitle, style = MaterialTheme.typography.titleLarge)
+        Text(
+          text = currentDir,
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.primary,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    },
+    text = {
+      Column(modifier = Modifier.fillMaxWidth()) {
+        FlowRow(
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          FilterChip(
+            selected = useRootMode,
+            onClick = { useRootMode = !useRootMode },
+            leadingIcon = { Icon(Icons.Rounded.AdminPanelSettings, contentDescription = null, modifier = Modifier.size(16.dp)) },
+            label = { Text(if (useRootMode) "Root (su)" else "Standard") },
+            modifier = Modifier.testTag("os_explorer_root_toggle"),
+          )
+          listOf("/", "/data/local", "/data/data", "/sdcard").forEach { shortcut ->
+            AssistChip(
+              onClick = { currentDir = shortcut },
+              label = { Text(shortcut, style = MaterialTheme.typography.labelSmall) },
+            )
+          }
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        if (!useRootMode && loadError != null) {
+          OutlinedButton(
+            onClick = {
+              onDismiss()
+              onOpenSettings()
+            },
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Icon(Icons.Rounded.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(strings.openSettings)
+          }
+          Spacer(Modifier.height(6.dp))
+        }
+
+        val parent = File(currentDir).parentFile
+        if (parent != null) {
+          Row(
+            modifier =
+              Modifier.fillMaxWidth()
+                .minimumInteractiveComponentSize()
+                .clickable { currentDir = parent.absolutePath }
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Icon(Icons.Rounded.ArrowUpward, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(8.dp))
+            Text(strings.parentDir, style = MaterialTheme.typography.bodyMedium)
+          }
+          HorizontalDivider()
+        }
+
+        Box(modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 300.dp)) {
+          when {
+            isLoading -> CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            loadError != null ->
+              Text(
+                text = loadError ?: "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.align(Alignment.Center).padding(12.dp),
+              )
+            entries.isEmpty() ->
+              Text(
+                text = strings.emptyFolder,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.Center).padding(12.dp),
+              )
+            else ->
+              LazyColumn {
+                items(entries, key = { it.path }) { item ->
+                  Row(
+                    modifier =
+                      Modifier.fillMaxWidth()
+                        .minimumInteractiveComponentSize()
+                        .clickable(enabled = item.isDirectory && !item.isSymlink) {
+                          currentDir = item.path
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                  ) {
+                    Icon(
+                      imageVector =
+                        when {
+                          item.isSymlink -> Icons.Rounded.LinkOff
+                          item.isDirectory -> Icons.Rounded.Folder
+                          else -> Icons.AutoMirrored.Rounded.InsertDriveFile
+                        },
+                      contentDescription = null,
+                      tint =
+                        when {
+                          item.isSymlink -> MaterialTheme.colorScheme.outline
+                          item.isDirectory -> MaterialTheme.colorScheme.primary
+                          else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                      Text(
+                        text = item.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                      )
+                      if (item.isSymlink) {
+                        Text(
+                          text = "SYMLINK (${strings.osSymlinkIgnoredShort})",
+                          style = MaterialTheme.typography.labelSmall,
+                          color = MaterialTheme.colorScheme.outline,
+                        )
+                      } else if (!item.isDirectory) {
+                        Text(
+                          text = "${item.sizeBytes / 1024} KB",
+                          style = MaterialTheme.typography.labelSmall,
+                          color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                      }
+                    }
+                  }
+                }
+              }
+          }
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { onSelectFolder(currentDir, useRootMode) },
+        modifier = Modifier.testTag("os_explorer_confirm_folder"),
+      ) {
+        Text(strings.selectCurrentFolder)
+      }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text(strings.cancel) } },
   )
 }

@@ -3,6 +3,10 @@ package com.hephaistos.appsign.core.report
 import com.hephaistos.appsign.core.model.ApkResignResult
 import com.hephaistos.appsign.core.model.ApkVerificationReport
 import com.hephaistos.appsign.core.model.AskInspectResult
+import com.hephaistos.appsign.core.model.OsSignInspectionReport
+import com.hephaistos.appsign.core.model.OsSignResignReport
+import com.hephaistos.appsign.core.model.ResignProResult
+import com.hephaistos.appsign.core.model.TargetSignatureProfile
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -19,6 +23,14 @@ object ReportFormatters {
     if (results.size == 1) json.encodeToString(results.first()) else json.encodeToString(results)
 
   fun askInspectToJson(result: AskInspectResult): String = json.encodeToString(result)
+
+  fun targetProfileToJson(profile: TargetSignatureProfile): String = json.encodeToString(profile)
+
+  fun resignProToJson(result: ResignProResult): String = json.encodeToString(result)
+
+  fun osSignInspectionToJson(report: OsSignInspectionReport): String = json.encodeToString(report)
+
+  fun osSignResignToJson(report: OsSignResignReport): String = json.encodeToString(report)
 
   fun verificationToText(report: ApkVerificationReport, french: Boolean = false): String =
     buildString {
@@ -118,6 +130,80 @@ object ReportFormatters {
       if (info.securityWarning != null) {
         appendLine()
         appendLine("[!] ${if (french) com.hephaistos.appsign.core.ask.AskKeyManager.UNENCRYPTED_WARNING_FR else info.securityWarning}")
+      }
+    }
+
+  fun resignProToText(result: ResignProResult, french: Boolean = false): String =
+    buildString {
+      val prof = result.targetProfile
+      appendLine("============================================================")
+      appendLine("APPSIGN RESIGNPRO REPORT")
+      appendLine("============================================================")
+      appendLine("${if (french) "Cible" else "Target"}      : ${prof.apkName}")
+      appendLine(
+        "${if (french) "Schémas" else "Schemes"}     : ${prof.detectedSchemes.joinToString(", ") { it.name }.ifBlank { "DEFAULT" }}"
+      )
+      appendLine("ZipAligned  : ${prof.wasZipAligned} | minSdk=${prof.minSdkVersion ?: "auto"}")
+      appendLine(
+        "${if (french) "Signataires" else "Signers"}     : ${prof.signerProfiles.size} (multi=${prof.hasMultipleSigners}, rotation=${prof.hasKeyRotation})"
+      )
+      result.generatedAskPaths.forEachIndexed { idx, path ->
+        val askInfo = result.generatedAskContainers.getOrNull(idx)
+        appendLine(
+          "  ASK #${idx + 1}    : $path (${askInfo?.mode ?: "?"} • ${askInfo?.metadata?.algorithm ?: "?"} ${askInfo?.metadata?.keySizeBits ?: 0}-bit)"
+        )
+      }
+      append(resignToText(result.resignResult, french))
+    }
+
+  fun osSignInspectionToText(report: OsSignInspectionReport, french: Boolean = false): String =
+    buildString {
+      appendLine("============================================================")
+      appendLine("APPSIGN OS SIGN — INSPECTION DASHBOARD")
+      appendLine("============================================================")
+      appendLine("${if (french) "Racine" else "Root"}        : ${report.rootDirectory}")
+      appendLine("${if (french) "Durée" else "Duration"}    : ${report.durationMs} ms")
+      appendLine("${if (french) "Analysés" else "Scanned"}     : ${report.totalFilesVisited} file(s)")
+      appendLine("${if (french) "Signés" else "Signed"}      : ${report.signedArtifactsCount}")
+      appendLine("${if (french) "Préservés" else "Preserved"}   : ${report.preservedUnsignedCount}")
+      appendLine("${if (french) "Symlinks" else "Symlinks"}    : ${report.symlinksIgnoredCount} (${if (french) "ignorés" else "ignored"})")
+      appendLine("${if (french) "Groupes" else "Key Groups"}  : ${report.groups.size}")
+      appendLine("${if (french) "Réf. perms" else "Perm Refs"}   : ${report.allPermissionReferences.size}")
+      report.groups.forEachIndexed { idx, grp ->
+        appendLine()
+        appendLine("--- GROUP #${idx + 1}: ${grp.label} ---")
+        appendLine("  SHA-256   : ${grp.sha256}")
+        appendLine("  Spec      : ${grp.keySpec.keyAlgorithm} ${grp.keySpec.keySizeBits}-bit (${grp.keySpec.sigAlgName})")
+        appendLine("  Subject   : ${grp.certificate.subjectDn}")
+        appendLine("  Artifacts : ${grp.artifacts.size} (${grp.artifacts.joinToString(", ") { it.relativePath }.take(140)})")
+        appendLine("  Perm Refs : ${grp.permissionReferences.size}")
+      }
+      if (report.warnings.isNotEmpty()) {
+        appendLine()
+        report.warnings.forEach { appendLine("  [!] $it") }
+      }
+    }
+
+  fun osSignResignToText(report: OsSignResignReport, french: Boolean = false): String =
+    buildString {
+      appendLine("============================================================")
+      appendLine("APPSIGN OS SIGN — RESIGN SUMMARY")
+      appendLine("============================================================")
+      appendLine("${if (french) "Racine" else "Root"}        : ${report.rootDirectory}")
+      appendLine("${if (french) "Stratégie" else "Strategy"}    : ${report.strategy}")
+      appendLine("${if (french) "Durée" else "Duration"}    : ${report.durationMs} ms")
+      appendLine("${if (french) "Succès" else "Succeeded"}   : ${report.totalSucceeded}/${report.totalResigned}")
+      appendLine("${if (french) "Échecs" else "Failed"}      : ${report.totalFailed}")
+      appendLine("${if (french) "Réf. MàJ" else "Refs Updated"}: ${report.totalReferencesUpdated}")
+      appendLine("${if (french) "Préservés" else "Preserved"}   : ${report.totalPreserved}")
+      appendLine("${if (french) "Symlinks" else "Symlinks"}    : ${report.symlinksIgnoredCount}")
+      report.generatedAskPaths.forEach { appendLine("  ASK Key   : $it") }
+      if (report.backupManifest != null) {
+        appendLine("  Backups   : ${report.backupManifest.entries.size} .appsign.bak")
+      }
+      if (report.warnings.isNotEmpty()) {
+        appendLine()
+        report.warnings.forEach { appendLine("  [!] $it") }
       }
     }
 }

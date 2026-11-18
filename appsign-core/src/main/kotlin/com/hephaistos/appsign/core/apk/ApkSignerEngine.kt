@@ -16,7 +16,17 @@ object ApkSignerEngine {
     outputApk: File,
     keyMaterial: UnlockedKeyMaterial,
     options: SigningOptions = SigningOptions(),
+  ): ApkResignResult = resignWithSigners(inputApk, outputApk, listOf(keyMaterial), options)
+
+  fun resignWithSigners(
+    inputApk: File,
+    outputApk: File,
+    signers: List<UnlockedKeyMaterial>,
+    options: SigningOptions = SigningOptions(),
   ): ApkResignResult {
+    if (signers.isEmpty()) {
+      throw ApkOperationException("At least one signing key is required.")
+    }
     if (!inputApk.exists() || !inputApk.isFile) {
       throw ApkOperationException("Input APK not found: ${inputApk.absolutePath}")
     }
@@ -32,8 +42,9 @@ object ApkSignerEngine {
       throw ApkOperationException("APK Signature Scheme v4 requires v2 or v3 to also be enabled.")
     }
 
+    val primaryKey = signers.first()
     val startNs = System.nanoTime()
-    val certFingerprint = CryptoSupport.certificateFingerprints(keyMaterial.certificate).sha256
+    val certFingerprint = CryptoSupport.certificateFingerprints(primaryKey.certificate).sha256
     var tempAlignedFile: File? = null
 
     return try {
@@ -49,36 +60,57 @@ object ApkSignerEngine {
         effectiveInput = inputApk
       }
 
-      val signerConfig =
-        ApkSigner.SignerConfig.Builder(
-            keyMaterial.alias,
-            com.android.apksig.KeyConfig.Jca(keyMaterial.privateKey),
-            keyMaterial.certificateChain,
-          )
-          .build()
+      val signerConfigs =
+        signers.mapIndexed { idx, mat ->
+          val safeName =
+            mat.alias.replace(Regex("[^a-zA-Z0-9._-]"), "_").ifBlank { "signer_${idx + 1}" }
+          ApkSigner.SignerConfig.Builder(
+              safeName,
+              com.android.apksig.KeyConfig.Jca(mat.privateKey),
+              mat.certificateChain,
+            )
+            .build()
+        }
 
       val effectiveV3 = options.enableV3 || options.enableV31
       val v4OutputFile =
         if (options.enableV4) File("${outputApk.absolutePath}.idsig") else null
 
-      val builder =
-        ApkSigner.Builder(listOf(signerConfig))
-          .setInputApk(effectiveInput)
-          .setOutputApk(outputApk)
-          .setV1SigningEnabled(options.enableV1)
-          .setV2SigningEnabled(options.enableV2)
-          .setV3SigningEnabled(effectiveV3)
-          .setV4SigningEnabled(options.enableV4)
-          .setCreatedBy(options.createdBy)
+      fun buildSigner(overrideMinSdk: Int?): ApkSigner {
+        val builder =
+          ApkSigner.Builder(signerConfigs)
+            .setInputApk(effectiveInput)
+            .setOutputApk(outputApk)
+            .setV1SigningEnabled(options.enableV1)
+            .setV2SigningEnabled(options.enableV2)
+            .setV3SigningEnabled(effectiveV3)
+            .setV4SigningEnabled(options.enableV4)
+            .setCreatedBy(options.createdBy)
 
-      if (v4OutputFile != null) {
-        builder.setV4SignatureOutputFile(v4OutputFile)
-      }
-      if (options.minSdkVersion != null) {
-        builder.setMinSdkVersion(options.minSdkVersion)
+        if (v4OutputFile != null) {
+          builder.setV4SignatureOutputFile(v4OutputFile)
+        }
+        val effectiveSdk = overrideMinSdk ?: options.minSdkVersion
+        if (effectiveSdk != null) {
+          builder.setMinSdkVersion(effectiveSdk)
+        }
+        return builder.build()
       }
 
-      builder.build().sign()
+      var usedMinSdk = options.minSdkVersion
+      try {
+        buildSigner(null).sign()
+      } catch (e: com.android.apksig.apk.MinSdkVersionException) {
+        if (options.minSdkVersion != null) throw e
+        val fallbackSdk =
+          when {
+            options.enableV1 -> 21
+            options.enableV2 -> 24
+            else -> 28
+          }
+        usedMinSdk = fallbackSdk
+        buildSigner(fallbackSdk).sign()
+      }
 
       val appliedSchemes = buildList {
         if (options.enableV1) add(SignatureSchemeVersion.V1)
@@ -88,7 +120,7 @@ object ApkSignerEngine {
       }
 
       // Mandatory automatic post-sign verification
-      val postReport = ApkVerifierEngine.verify(outputApk, v4OutputFile, options.minSdkVersion)
+      val postReport = ApkVerifierEngine.verify(outputApk, v4OutputFile, usedMinSdk)
       val durationMs = (System.nanoTime() - startNs) / 1_000_000L
 
       ApkResignResult(
@@ -98,7 +130,7 @@ object ApkSignerEngine {
         success = postReport.verified,
         zipAligned = aligned,
         appliedSchemes = appliedSchemes,
-        keyAlias = keyMaterial.alias,
+        keyAlias = signers.joinToString(", ") { it.alias },
         keyFingerprintSha256 = certFingerprint,
         postVerifyReport = postReport,
         errorMessage = if (postReport.verified) null else postReport.errors.joinToString("; "),
@@ -113,7 +145,7 @@ object ApkSignerEngine {
         success = false,
         zipAligned = false,
         appliedSchemes = emptyList(),
-        keyAlias = keyMaterial.alias,
+        keyAlias = primaryKey.alias,
         keyFingerprintSha256 = certFingerprint,
         postVerifyReport = null,
         errorMessage = e.message ?: "Unknown signing error",

@@ -38,6 +38,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -62,6 +65,7 @@ import com.hephaistos.appsign.android.ui.i18n.LocalAppsignStrings
 import com.hephaistos.appsign.android.ui.viewmodel.ResignUiState
 import com.hephaistos.appsign.android.ui.viewmodel.SigningKeySource
 import com.hephaistos.appsign.core.model.CreateAskOptions
+import com.hephaistos.appsign.core.model.IdentityInput
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -79,6 +83,9 @@ fun ResignScreen(
   onSetOutputPath: (String) -> Unit,
   onSetOutputSafTree: (Uri) -> Unit,
   onStartResign: (CharArray?) -> Unit,
+  onSetProMode: (Boolean) -> Unit,
+  onAnalyzeProTarget: () -> Unit,
+  onStartResignPro: (List<IdentityInput>) -> Unit,
   onDismissPassword: () -> Unit,
   onClearSelection: () -> Unit,
   onOpenSettings: () -> Unit,
@@ -109,6 +116,26 @@ fun ResignScreen(
   ) {
     Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
       Text(strings.resignScreenTitle, style = MaterialTheme.typography.headlineMedium)
+      Spacer(Modifier.height(10.dp))
+
+      SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        SegmentedButton(
+          selected = !state.isProMode,
+          onClick = { onSetProMode(false) },
+          shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+          modifier = Modifier.testTag("resign_mode_standard"),
+        ) {
+          Text(strings.resignModeStandard)
+        }
+        SegmentedButton(
+          selected = state.isProMode,
+          onClick = { onSetProMode(true) },
+          shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+          modifier = Modifier.testTag("resign_mode_pro"),
+        ) {
+          Text(strings.resignModePro)
+        }
+      }
       Spacer(Modifier.height(14.dp))
 
       // Step 1: Select APKs
@@ -160,136 +187,7 @@ fun ResignScreen(
 
       Spacer(Modifier.height(14.dp))
 
-      // Step 2: Signing Key
-      SectionCard {
-        Text(strings.stepSelectKey, style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(10.dp))
-        FlowRow(
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-          OutlinedButton(
-            onClick = { showCreateKeyDialog = true },
-            modifier = Modifier.testTag("resign_create_key_button"),
-          ) {
-            Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(strings.createNewKeyInline)
-          }
-          OutlinedButton(
-            onClick = { safExternalKeyLauncher.launch(arrayOf("*/*")) },
-            modifier = Modifier.testTag("resign_import_ext_key_button"),
-          ) {
-            Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text(strings.importExternalKey)
-          }
-        }
-
-        if (state.selectedKeySource is SigningKeySource.ExternalKeyFile) {
-          Spacer(Modifier.height(8.dp))
-          Surface(
-            color = MaterialTheme.colorScheme.primaryContainer,
-            shape = MaterialTheme.shapes.small,
-            modifier = Modifier.fillMaxWidth(),
-          ) {
-            Text(
-              text = "External: ${state.selectedKeySource.file.name}",
-              style = MaterialTheme.typography.labelMedium,
-              color = MaterialTheme.colorScheme.onPrimaryContainer,
-              modifier = Modifier.padding(10.dp),
-            )
-          }
-        }
-
-        if (managedKeys.isNotEmpty()) {
-          Spacer(Modifier.height(10.dp))
-          managedKeys.forEach { key ->
-            val selected =
-              state.selectedKeySource is SigningKeySource.ManagedAsk &&
-                state.selectedKeySource.entity.keyId == key.keyId
-            Surface(
-              modifier =
-                Modifier.fillMaxWidth()
-                  .padding(vertical = 4.dp)
-                  .clickable { onSelectManagedKey(key) },
-              shape = MaterialTheme.shapes.medium,
-              color =
-                if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
-                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-              border =
-                if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
-                else null,
-            ) {
-              Row(
-                modifier = Modifier.padding(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-              ) {
-                RadioButton(selected = selected, onClick = { onSelectManagedKey(key) })
-                Spacer(Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                  Text(key.alias, style = MaterialTheme.typography.titleSmall)
-                  Text(
-                    "${key.algorithm} ${key.keySizeBits}-bit • ${key.mode}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                  )
-                }
-              }
-            }
-          }
-        }
-      }
-
-      Spacer(Modifier.height(14.dp))
-
-      // Step 3: Signature Schemes
-      SectionCard {
-        Text(strings.stepSelectSchemes, style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(10.dp))
-        FlowRow(
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-          FilterChip(
-            selected = state.enableV1,
-            onClick = { onUpdateSchemes(!state.enableV1, state.enableV2, state.enableV3, state.enableV31, state.enableV4, state.alignBeforeSign) },
-            label = { Text("v1 (JAR)") },
-          )
-          FilterChip(
-            selected = state.enableV2,
-            onClick = { onUpdateSchemes(state.enableV1, !state.enableV2, state.enableV3, state.enableV31, state.enableV4, state.alignBeforeSign) },
-            label = { Text("v2") },
-          )
-          FilterChip(
-            selected = state.enableV3,
-            onClick = { onUpdateSchemes(state.enableV1, state.enableV2, !state.enableV3, state.enableV31, state.enableV4, state.alignBeforeSign) },
-            label = { Text("v3") },
-          )
-          FilterChip(
-            selected = state.enableV31,
-            onClick = { onUpdateSchemes(state.enableV1, state.enableV2, state.enableV3, !state.enableV31, state.enableV4, state.alignBeforeSign) },
-            label = { Text("v3.1") },
-          )
-          FilterChip(
-            selected = state.enableV4,
-            onClick = { onUpdateSchemes(state.enableV1, state.enableV2, state.enableV3, state.enableV31, !state.enableV4, state.alignBeforeSign) },
-            label = { Text("v4 (.idsig)") },
-          )
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Text(strings.zipAlignLabel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-          Switch(
-            checked = state.alignBeforeSign,
-            onCheckedChange = { onUpdateSchemes(state.enableV1, state.enableV2, state.enableV3, state.enableV31, state.enableV4, it) },
-          )
-        }
-      }
-
-      Spacer(Modifier.height(14.dp))
-
-      // Step 4: Output Folder
+      // Output Folder (shared between Standard and RESIGNPRO)
       SectionCard {
         Text(strings.stepOutputFolder, style = MaterialTheme.typography.titleMedium)
         Spacer(Modifier.height(6.dp))
@@ -317,14 +215,151 @@ fun ResignScreen(
 
       Spacer(Modifier.height(16.dp))
 
-      Button(
-        onClick = { onStartResign(null) },
-        enabled = state.targets.isNotEmpty() && state.selectedKeySource != null && !state.isRunning,
-        modifier = Modifier.fillMaxWidth().height(52.dp).testTag("resign_start_button"),
-      ) {
-        Icon(Icons.Rounded.EditNote, contentDescription = null)
-        Spacer(Modifier.width(8.dp))
-        Text(strings.startResign)
+      if (state.isProMode) {
+        ResignProPanel(
+          state = state,
+          onAnalyzeTarget = onAnalyzeProTarget,
+          onRunResignPro = onStartResignPro,
+        )
+      } else {
+        // Step 2: Signing Key
+        SectionCard {
+          Text(strings.stepSelectKey, style = MaterialTheme.typography.titleMedium)
+          Spacer(Modifier.height(10.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            OutlinedButton(
+              onClick = { showCreateKeyDialog = true },
+              modifier = Modifier.testTag("resign_create_key_button"),
+            ) {
+              Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+              Spacer(Modifier.width(6.dp))
+              Text(strings.createNewKeyInline)
+            }
+            OutlinedButton(
+              onClick = { safExternalKeyLauncher.launch(arrayOf("*/*")) },
+              modifier = Modifier.testTag("resign_import_ext_key_button"),
+            ) {
+              Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+              Spacer(Modifier.width(6.dp))
+              Text(strings.importExternalKey)
+            }
+          }
+
+          if (state.selectedKeySource is SigningKeySource.ExternalKeyFile) {
+            Spacer(Modifier.height(8.dp))
+            Surface(
+              color = MaterialTheme.colorScheme.primaryContainer,
+              shape = MaterialTheme.shapes.small,
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Text(
+                text = "External: ${state.selectedKeySource.file.name}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.padding(10.dp),
+              )
+            }
+          }
+
+          if (managedKeys.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            managedKeys.forEach { key ->
+              val selected =
+                state.selectedKeySource is SigningKeySource.ManagedAsk &&
+                  state.selectedKeySource.entity.keyId == key.keyId
+              Surface(
+                modifier =
+                  Modifier.fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .clickable { onSelectManagedKey(key) },
+                shape = MaterialTheme.shapes.medium,
+                color =
+                  if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                  else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                border =
+                  if (selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                  else null,
+              ) {
+                Row(
+                  modifier = Modifier.padding(10.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                ) {
+                  RadioButton(selected = selected, onClick = { onSelectManagedKey(key) })
+                  Spacer(Modifier.width(8.dp))
+                  Column(modifier = Modifier.weight(1f)) {
+                    Text(key.alias, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                      "${key.algorithm} ${key.keySizeBits}-bit • ${key.mode}",
+                      style = MaterialTheme.typography.labelSmall,
+                      color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        Spacer(Modifier.height(14.dp))
+
+        // Step 3: Signature Schemes
+        SectionCard {
+          Text(strings.stepSelectSchemes, style = MaterialTheme.typography.titleMedium)
+          Spacer(Modifier.height(10.dp))
+          FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            FilterChip(
+              selected = state.enableV1,
+              onClick = { onUpdateSchemes(!state.enableV1, state.enableV2, state.enableV3, state.enableV31, state.enableV4, state.alignBeforeSign) },
+              label = { Text("v1 (JAR)") },
+            )
+            FilterChip(
+              selected = state.enableV2,
+              onClick = { onUpdateSchemes(state.enableV1, !state.enableV2, state.enableV3, state.enableV31, state.enableV4, state.alignBeforeSign) },
+              label = { Text("v2") },
+            )
+            FilterChip(
+              selected = state.enableV3,
+              onClick = { onUpdateSchemes(state.enableV1, state.enableV2, !state.enableV3, state.enableV31, state.enableV4, state.alignBeforeSign) },
+              label = { Text("v3") },
+            )
+            FilterChip(
+              selected = state.enableV31,
+              onClick = { onUpdateSchemes(state.enableV1, state.enableV2, state.enableV3, !state.enableV31, state.enableV4, state.alignBeforeSign) },
+              label = { Text("v3.1") },
+            )
+            FilterChip(
+              selected = state.enableV4,
+              onClick = { onUpdateSchemes(state.enableV1, state.enableV2, state.enableV3, state.enableV31, !state.enableV4, state.alignBeforeSign) },
+              label = { Text("v4 (.idsig)") },
+            )
+          }
+          Spacer(Modifier.height(8.dp))
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(strings.zipAlignLabel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            Switch(
+              checked = state.alignBeforeSign,
+              onCheckedChange = { onUpdateSchemes(state.enableV1, state.enableV2, state.enableV3, state.enableV31, state.enableV4, it) },
+            )
+          }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        Button(
+          onClick = { onStartResign(null) },
+          enabled = state.targets.isNotEmpty() && state.selectedKeySource != null && !state.isRunning,
+          modifier = Modifier.fillMaxWidth().height(52.dp).testTag("resign_start_button"),
+        ) {
+          Icon(Icons.Rounded.EditNote, contentDescription = null)
+          Spacer(Modifier.width(8.dp))
+          Text(strings.startResign)
+        }
       }
 
       if (state.isRunning) {

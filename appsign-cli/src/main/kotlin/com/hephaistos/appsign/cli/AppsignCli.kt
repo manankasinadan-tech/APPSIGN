@@ -12,9 +12,16 @@ import com.hephaistos.appsign.core.model.ApkResignResult
 import com.hephaistos.appsign.core.model.ApkVerificationReport
 import com.hephaistos.appsign.core.model.AskMode
 import com.hephaistos.appsign.core.model.CreateAskOptions
+import com.hephaistos.appsign.core.model.IdentityInput
 import com.hephaistos.appsign.core.model.KeyAlgorithm
+import com.hephaistos.appsign.core.model.OsBackupManifest
+import com.hephaistos.appsign.core.model.OsResignKeyStrategy
 import com.hephaistos.appsign.core.model.SigningOptions
 import com.hephaistos.appsign.core.model.UnlockedKeyMaterial
+import com.hephaistos.appsign.core.ossign.OsResignPlan
+import com.hephaistos.appsign.core.ossign.OsSignAnalyzerEngine
+import com.hephaistos.appsign.core.ossign.OsSignResignEngine
+import com.hephaistos.appsign.core.pro.ResignProEngine
 import com.hephaistos.appsign.core.report.ReportFormatters
 import java.io.File
 import java.io.PrintStream
@@ -47,6 +54,8 @@ object ExitCodes {
   subcommands = [
     VerifyCommand::class,
     ResignCommand::class,
+    ResignProCommand::class,
+    OsSignCommand::class,
     KeyCommand::class,
   ],
 )
@@ -252,6 +261,242 @@ class ResignCommand : Callable<Int> {
         AskKeyManager.importFromJks(ks, storePw, alias, keyPw)
       }
     return AskKeyManager.unlockAsk(container, null)
+  }
+}
+
+@Command(
+  name = "resign-pro",
+  mixinStandardHelpOptions = true,
+  description = ["Analyze target APK signature crypto spec, create matching .ask key(s) from identity only, and resign faithfully."],
+)
+class ResignProCommand : Callable<Int> {
+  @ParentCommand lateinit var root: AppsignCommand
+
+  @Parameters(index = "0", paramLabel = "<apk>", description = ["Target APK file to analyze and clone-resign."])
+  lateinit var inputApk: File
+
+  @Option(names = ["--alias"], description = ["Alias for the generated .ask key(s)."])
+  var alias: String = "resignpro-key"
+
+  @Option(names = ["--cn"], required = true, description = ["New signer Common Name (CN)."])
+  lateinit var cn: String
+
+  @Option(names = ["--org"], description = ["New signer Organization (O)."])
+  var org: String = "APPSIGN"
+
+  @Option(names = ["--ou"], description = ["New signer Organizational Unit (OU)."])
+  var ou: String = "Security"
+
+  @Option(names = ["--country"], description = ["New signer Country code (C)."])
+  var country: String = "FR"
+
+  @Option(names = ["--pass"], description = ["Optional passphrase for ASK-LOCKED mode (default: ASK-OPEN)."])
+  var pass: String? = null
+
+  @Option(names = ["--ask-dir"], description = ["Directory where generated .ask key(s) will be saved."])
+  var askDir: File = File("keys")
+
+  @Option(names = ["-o", "--output"], description = ["Output resigned APK path."])
+  var output: File? = null
+
+  @Option(names = ["--json"], description = ["Output structured JSON report."])
+  var json: Boolean = false
+
+  override fun call(): Int {
+    if (!inputApk.exists() || !inputApk.isFile) {
+      System.err.println(if (root.isFrench) "Erreur : APK introuvable." else "Error: target APK not found.")
+      return ExitCodes.IO_ERROR
+    }
+    val targetOut =
+      output ?: File(inputApk.parentFile ?: File("."), "${inputApk.nameWithoutExtension}-resignpro.apk")
+    val identity =
+      IdentityInput(
+        alias = alias,
+        commonName = cn,
+        organization = org,
+        organizationalUnit = ou,
+        country = country,
+        passphrase = pass?.takeIf { it.isNotEmpty() }?.toCharArray(),
+      )
+    val result =
+      ResignProEngine.resignPro(
+        inputApk = inputApk,
+        outputApk = targetOut,
+        identities = listOf(identity),
+        askOutputDir = askDir,
+      )
+    if (json) {
+      println(ReportFormatters.resignProToJson(result))
+    } else {
+      print(ReportFormatters.resignProToText(result, root.isFrench))
+    }
+    return if (result.resignResult.success) ExitCodes.OK else ExitCodes.VERIFICATION_FAILED
+  }
+}
+
+@Command(
+  name = "os-sign",
+  mixinStandardHelpOptions = true,
+  description = ["Analyze and resign unpacked Android GSI / partition directories while strictly ignoring symlinks."],
+  subcommands = [
+    OsSignVerifyCommand::class,
+    OsSignResignCommand::class,
+    OsSignRestoreCommand::class,
+    OsSignCleanBakCommand::class,
+  ],
+)
+class OsSignCommand : Callable<Int> {
+  override fun call(): Int {
+    CommandLine(this).usage(System.out)
+    return ExitCodes.OK
+  }
+}
+
+@Command(name = "verify", mixinStandardHelpOptions = true, description = ["Analyze an unpacked partition directory and group artifacts by signer key."])
+class OsSignVerifyCommand : Callable<Int> {
+  @ParentCommand lateinit var parent: OsSignCommand
+
+  @Parameters(index = "0", paramLabel = "<dir>", description = ["Unpacked GSI or partition directory."])
+  lateinit var dir: File
+
+  @Option(names = ["--json"], description = ["Output JSON dashboard."])
+  var json: Boolean = false
+
+  override fun call(): Int {
+    val report = OsSignAnalyzerEngine.analyzeDirectory(dir)
+    if (json) {
+      println(ReportFormatters.osSignInspectionToJson(report))
+    } else {
+      print(ReportFormatters.osSignInspectionToText(report, false))
+    }
+    return ExitCodes.OK
+  }
+}
+
+@Command(name = "resign", mixinStandardHelpOptions = true, description = ["Resign an unpacked partition directory in place."])
+class OsSignResignCommand : Callable<Int> {
+  @Parameters(index = "0", paramLabel = "<dir>", description = ["Unpacked GSI or partition directory."])
+  lateinit var dir: File
+
+  @Option(names = ["--strategy"], description = ["Strategy: identities, clone, existing (default: identities)."])
+  var strategy: String = "identities"
+
+  @Option(names = ["--cn"], description = ["Common Name base when strategy=identities."])
+  var cn: String = "APPSIGN OS"
+
+  @Option(names = ["--org"], description = ["Organization (O) when strategy=identities."])
+  var org: String = "APPSIGN"
+
+  @Option(names = ["--ou"], description = ["Organizational Unit (OU) when strategy=identities."])
+  var ou: String = "System"
+
+  @Option(names = ["--country"], description = ["Country code (C) when strategy=identities."])
+  var country: String = "FR"
+
+  @Option(names = ["--pass"], description = ["Optional passphrase for created .ask keys (default: ASK-OPEN)."])
+  var pass: String? = null
+
+  @Option(names = ["--key-map"], description = ["Group-to-ASK mapping (groupId=path/to/key.ask) when strategy=existing."])
+  var keyMaps: List<String> = emptyList()
+
+  @Option(names = ["--ask-dir"], description = ["Directory for auto-generated .ask keys."])
+  var askDir: File = File("os_keys")
+
+  @Option(names = ["--no-bak"], description = ["Disable .appsign.bak backups before in-place overwrite."])
+  var noBak: Boolean = false
+
+  @Option(names = ["--manifest-out"], description = ["Write backup manifest JSON file for later restore or bak cleanup."])
+  var manifestOut: File? = null
+
+  @Option(names = ["--json"], description = ["Output JSON report."])
+  var json: Boolean = false
+
+  override fun call(): Int {
+    val inspection = OsSignAnalyzerEngine.analyzeDirectory(dir)
+    val passChars = pass?.takeIf { it.isNotEmpty() }?.toCharArray()
+    val plan =
+      when (strategy.lowercase()) {
+        "clone" ->
+          OsResignPlan(
+            strategy = OsResignKeyStrategy.CLONE_DETECTED_KEYS,
+            clonePassphrase = passChars,
+            createBackups = !noBak,
+          )
+        "existing" -> {
+          val resolved = linkedMapOf<String, UnlockedKeyMaterial>()
+          for (spec in keyMaps) {
+            val parts = spec.split("=", limit = 2)
+            if (parts.size != 2) throw IllegalArgumentException("Invalid --key-map syntax: $spec")
+            val container = AskKeyManager.readAsk(File(parts[1]))
+            val unlocked = AskKeyManager.unlockAsk(container, if (container.mode == AskMode.ASK_LOCKED) passChars else null)
+            resolved[parts[0]] = unlocked
+          }
+          OsResignPlan(
+            strategy = OsResignKeyStrategy.USE_EXISTING_KEYS,
+            existingKeyPerGroup = resolved,
+            createBackups = !noBak,
+          )
+        }
+        else ->
+          OsResignPlan(
+            strategy = OsResignKeyStrategy.CREATE_WITH_IDENTITIES,
+            identityPerGroup =
+              inspection.groups.associate { grp ->
+                grp.groupId to
+                  IdentityInput(
+                    alias = "os_${grp.groupId}",
+                    commonName = "$cn - ${grp.label}",
+                    organization = org,
+                    organizationalUnit = ou,
+                    country = country,
+                    passphrase = passChars,
+                  )
+              },
+            createBackups = !noBak,
+          )
+      }
+
+    val result = OsSignResignEngine.executeResign(inspection, plan, askDir)
+    val manifest = result.backupManifest
+    if (manifest != null) {
+      val targetManifest = manifestOut ?: File(dir, ".appsign-backup-manifest.json")
+      targetManifest.writeText(ReportFormatters.json.encodeToString(OsBackupManifest.serializer(), manifest), Charsets.UTF_8)
+    }
+
+    if (json) {
+      println(ReportFormatters.osSignResignToJson(result))
+    } else {
+      print(ReportFormatters.osSignResignToText(result, false))
+    }
+    return if (result.totalFailed == 0) ExitCodes.OK else ExitCodes.VERIFICATION_FAILED
+  }
+}
+
+@Command(name = "restore", mixinStandardHelpOptions = true, description = ["Restore files modified by OS Sign from .appsign.bak backups."])
+class OsSignRestoreCommand : Callable<Int> {
+  @Parameters(index = "0", paramLabel = "<manifest.json>", description = ["Backup manifest JSON generated by os-sign resign."])
+  lateinit var manifestFile: File
+
+  override fun call(): Int {
+    val manifest = ReportFormatters.json.decodeFromString(OsBackupManifest.serializer(), manifestFile.readText(Charsets.UTF_8))
+    val (restored, errors) = OsSignResignEngine.restoreFromBackups(manifest)
+    println("Restored $restored file(s).")
+    errors.forEach { System.err.println("[!] $it") }
+    return if (errors.isEmpty()) ExitCodes.OK else ExitCodes.IO_ERROR
+  }
+}
+
+@Command(name = "clean-bak", mixinStandardHelpOptions = true, description = ["Delete all .appsign.bak backups listed in a backup manifest."])
+class OsSignCleanBakCommand : Callable<Int> {
+  @Parameters(index = "0", paramLabel = "<manifest.json>", description = ["Backup manifest JSON generated by os-sign resign."])
+  lateinit var manifestFile: File
+
+  override fun call(): Int {
+    val manifest = ReportFormatters.json.decodeFromString(OsBackupManifest.serializer(), manifestFile.readText(Charsets.UTF_8))
+    val (deleted, errors) = OsSignResignEngine.deleteBackups(manifest)
+    println("Deleted $deleted .appsign.bak file(s).")
+    errors.forEach { System.err.println("[!] $it") }
+    return if (errors.isEmpty()) ExitCodes.OK else ExitCodes.IO_ERROR
   }
 }
 

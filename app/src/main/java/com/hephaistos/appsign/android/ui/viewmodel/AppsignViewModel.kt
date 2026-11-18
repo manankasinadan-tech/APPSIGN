@@ -26,7 +26,11 @@ import com.hephaistos.appsign.core.model.ApkVerificationReport
 import com.hephaistos.appsign.core.model.AskInspectResult
 import com.hephaistos.appsign.core.model.AskMode
 import com.hephaistos.appsign.core.model.CreateAskOptions
+import com.hephaistos.appsign.core.model.IdentityInput
+import com.hephaistos.appsign.core.model.OsResignKeyStrategy
+import com.hephaistos.appsign.core.model.ResignProResult
 import com.hephaistos.appsign.core.model.SigningOptions
+import com.hephaistos.appsign.core.model.TargetSignatureProfile
 import com.hephaistos.appsign.core.model.VerificationStatus
 import com.hephaistos.appsign.core.report.ReportFormatters
 import java.io.File
@@ -77,6 +81,11 @@ data class ResignUiState(
   val results: List<ApkResignResult> = emptyList(),
   val needsKeyPasswordFor: SigningKeySource? = null,
   val errorMessage: String? = null,
+  // RESIGNPRO additions
+  val isProMode: Boolean = false,
+  val isAnalyzingPro: Boolean = false,
+  val analyzedProProfile: TargetSignatureProfile? = null,
+  val proResult: ResignProResult? = null,
 )
 
 data class KeyManagerUiState(
@@ -113,6 +122,11 @@ class AppsignViewModel(
   private val _keyUiState = MutableStateFlow(KeyManagerUiState())
   val keyUiState: StateFlow<KeyManagerUiState> = _keyUiState.asStateFlow()
 
+  private val _osSignState = MutableStateFlow(OsSignUiState())
+  val osSignState: StateFlow<OsSignUiState> = _osSignState.asStateFlow()
+
+  private val coordinator = OsSignAndProCoordinator(appContext, keyRepo, historyRepo)
+
   private val _hasStoragePermission = MutableStateFlow(DeviceStorageHelper.hasFullStorageAccess(appContext))
   val hasStoragePermission: StateFlow<Boolean> = _hasStoragePermission.asStateFlow()
 
@@ -125,6 +139,15 @@ class AppsignViewModel(
   init {
     viewModelScope.launch {
       keyRepo.syncDiskKeys()
+      coordinator.loadPersistedBackupState()?.let { persisted ->
+        _osSignState.value =
+          _osSignState.value.copy(
+            targetDirPath = persisted.manifest.rootDirectory,
+            viaRoot = persisted.viaRoot,
+            activeBackupManifest = persisted.manifest,
+            activeBackupViaRoot = persisted.viaRoot,
+          )
+      }
       settings.collect { s ->
         val current = _resignState.value
         if (!current.isRunning && current.results.isEmpty() && current.targets.isEmpty()) {
@@ -294,8 +317,13 @@ class AppsignViewModel(
       _resignState.value =
         _resignState.value.copy(
           targets = (_resignState.value.targets + added).distinctBy { it.localFile.absolutePath },
+          analyzedProProfile = null,
+          proResult = null,
           errorMessage = null,
         )
+      if (_resignState.value.isProMode) {
+        analyzeTargetForPro()
+      }
     }
   }
 
@@ -304,8 +332,13 @@ class AppsignViewModel(
     _resignState.value =
       _resignState.value.copy(
         targets = (_resignState.value.targets + added).distinctBy { it.localFile.absolutePath },
+        analyzedProProfile = null,
+        proResult = null,
         errorMessage = null,
       )
+    if (_resignState.value.isProMode) {
+      analyzeTargetForPro()
+    }
   }
 
   fun selectManagedKeyForResign(entity: ManagedKeyEntity) {
@@ -360,7 +393,84 @@ class AppsignViewModel(
   }
 
   fun clearResignSelection() {
-    _resignState.value = _resignState.value.copy(targets = emptyList(), results = emptyList(), errorMessage = null)
+    _resignState.value =
+      _resignState.value.copy(
+        targets = emptyList(),
+        results = emptyList(),
+        analyzedProProfile = null,
+        proResult = null,
+        errorMessage = null,
+      )
+  }
+
+  fun setResignProMode(enabled: Boolean) {
+    _resignState.value = _resignState.value.copy(isProMode = enabled, errorMessage = null)
+    if (enabled && _resignState.value.targets.isNotEmpty() && _resignState.value.analyzedProProfile == null) {
+      analyzeTargetForPro()
+    }
+  }
+
+  fun analyzeTargetForPro() {
+    val firstTarget = _resignState.value.targets.firstOrNull() ?: return
+    if (_resignState.value.isAnalyzingPro) return
+    viewModelScope.launch {
+      _resignState.value = _resignState.value.copy(isAnalyzingPro = true, errorMessage = null)
+      runCatching { coordinator.analyzeResignProTarget(firstTarget.localFile) }
+        .onSuccess { profile ->
+          _resignState.value =
+            _resignState.value.copy(
+              isAnalyzingPro = false,
+              analyzedProProfile = profile,
+              enableV1 = profile.enableV1,
+              enableV2 = profile.enableV2,
+              enableV3 = profile.enableV3,
+              enableV31 = profile.enableV31,
+              enableV4 = profile.enableV4,
+              alignBeforeSign = profile.wasZipAligned || true,
+            )
+        }
+        .onFailure { err ->
+          _resignState.value = _resignState.value.copy(isAnalyzingPro = false, errorMessage = err.message)
+        }
+    }
+  }
+
+  fun startResignPro(identities: List<IdentityInput>) {
+    val state = _resignState.value
+    if (state.targets.isEmpty() || state.isRunning) return
+    viewModelScope.launch {
+      _resignState.value = state.copy(isRunning = true, results = emptyList(), proResult = null, errorMessage = null)
+      val workDir =
+        if (state.outputTreeUri != null) {
+          File(appContext.cacheDir, "appsign_saf_out").apply { mkdirs() }
+        } else {
+          val chosen = File(state.outputDirectoryPath)
+          if (DeviceStorageHelper.hasFullStorageAccess(appContext)) {
+            chosen.apply { mkdirs() }
+          } else {
+            File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "signed").apply { mkdirs() }
+          }
+        }
+      runCatching {
+        coordinator.executeResignPro(
+          targets = state.targets,
+          analyzedProfile = state.analyzedProProfile,
+          identities = identities,
+          workDir = workDir,
+          safTreeUri = state.outputTreeUri,
+        )
+      }.onSuccess { proRes ->
+        _resignState.value =
+          _resignState.value.copy(
+            isRunning = false,
+            analyzedProProfile = proRes.targetProfile,
+            proResult = proRes,
+            results = listOf(proRes.resignResult),
+          )
+      }.onFailure { err ->
+        _resignState.value = _resignState.value.copy(isRunning = false, errorMessage = err.message)
+      }
+    }
   }
 
   fun startResign(passphrase: CharArray? = null, aliasOverride: String? = null) {
@@ -637,6 +747,161 @@ class AppsignViewModel(
 
   fun clearKeyNotices() {
     _keyUiState.value = _keyUiState.value.copy(statusMessage = null, errorMessage = null, lastSecurityWarning = null)
+  }
+
+  // --- OS SIGN FLOW ---
+
+  fun setOsTargetDirectory(path: String, viaRoot: Boolean) {
+    _osSignState.value =
+      _osSignState.value.copy(
+        targetDirPath = path.trim(),
+        viaRoot = viaRoot,
+        inspectionReport = null,
+        resignReport = null,
+        errorMessage = null,
+        statusMessage = null,
+      )
+  }
+
+  fun setOsCreateBackups(enabled: Boolean) {
+    _osSignState.value = _osSignState.value.copy(createBackups = enabled)
+  }
+
+  fun openOsStrategyDialog() {
+    _osSignState.value = _osSignState.value.copy(showStrategyDialog = true, errorMessage = null)
+  }
+
+  fun dismissOsStrategyDialog() {
+    _osSignState.value = _osSignState.value.copy(showStrategyDialog = false)
+  }
+
+  fun runOsVerify() {
+    val cur = _osSignState.value
+    if (cur.targetDirPath.isBlank() || cur.isRunning) return
+    viewModelScope.launch {
+      _osSignState.value = cur.copy(isRunning = true, errorMessage = null, statusMessage = null)
+      runCatching {
+        coordinator.runOsVerify(cur.targetDirPath, cur.viaRoot) { count, label ->
+          _osSignState.value =
+            _osSignState.value.copy(progressCurrent = count, progressLabel = label)
+        }
+      }.onSuccess { report ->
+        _osSignState.value =
+          _osSignState.value.copy(
+            isRunning = false,
+            inspectionReport = report,
+            progressLabel = "",
+          )
+      }.onFailure { err ->
+        _osSignState.value =
+          _osSignState.value.copy(
+            isRunning = false,
+            errorMessage = err.message ?: "OS Sign verify failed",
+            progressLabel = "",
+          )
+      }
+    }
+  }
+
+  fun runOsResign(
+    strategy: OsResignKeyStrategy,
+    identitiesPerGroup: Map<String, IdentityInput>,
+    selectedKeysPerGroup: Map<String, ManagedKeyEntity>,
+    passphrasesPerGroup: Map<String, CharArray>,
+    clonePassphrase: CharArray?,
+    createBackups: Boolean,
+  ) {
+    val cur = _osSignState.value
+    if (cur.targetDirPath.isBlank() || cur.isRunning) return
+    viewModelScope.launch {
+      _osSignState.value =
+        cur.copy(
+          showStrategyDialog = false,
+          isRunning = true,
+          createBackups = createBackups,
+          errorMessage = null,
+          statusMessage = null,
+        )
+      runCatching {
+        coordinator.runOsResign(
+          targetDirPath = cur.targetDirPath,
+          viaRoot = cur.viaRoot,
+          existingInspection = cur.inspectionReport,
+          strategy = strategy,
+          identitiesPerGroup = identitiesPerGroup,
+          selectedKeysPerGroup = selectedKeysPerGroup,
+          passphrasesPerGroup = passphrasesPerGroup,
+          clonePassphrase = clonePassphrase,
+          createBackups = createBackups,
+        ) { idx, total, label ->
+          _osSignState.value =
+            _osSignState.value.copy(progressCurrent = idx, progressTotal = total, progressLabel = label)
+        }
+      }.onSuccess { report ->
+        val updatedManifest = report.backupManifest ?: _osSignState.value.activeBackupManifest
+        _osSignState.value =
+          _osSignState.value.copy(
+            isRunning = false,
+            resignReport = report,
+            activeBackupManifest = updatedManifest,
+            activeBackupViaRoot = if (report.backupManifest != null) cur.viaRoot else _osSignState.value.activeBackupViaRoot,
+            progressLabel = "",
+            statusMessage = "Resigned ${report.totalSucceeded}/${report.totalResigned} artifacts",
+          )
+      }.onFailure { err ->
+        _osSignState.value =
+          _osSignState.value.copy(
+            isRunning = false,
+            errorMessage = err.message ?: "OS Sign resign failed",
+            progressLabel = "",
+          )
+      }
+    }
+  }
+
+  fun restoreOsBackups() {
+    val cur = _osSignState.value
+    val manifest = cur.activeBackupManifest ?: return
+    if (cur.isRunning) return
+    viewModelScope.launch {
+      _osSignState.value = cur.copy(isRunning = true, errorMessage = null, statusMessage = null)
+      runCatching { coordinator.restoreBackups(manifest, cur.activeBackupViaRoot) }
+        .onSuccess { (count, errors) ->
+          _osSignState.value =
+            _osSignState.value.copy(
+              isRunning = false,
+              activeBackupManifest = if (errors.isEmpty()) null else manifest,
+              resignReport = null,
+              statusMessage = "Restored $count file(s) to original state.",
+              errorMessage = errors.takeIf { it.isNotEmpty() }?.joinToString("\n"),
+            )
+        }
+        .onFailure { err ->
+          _osSignState.value = _osSignState.value.copy(isRunning = false, errorMessage = err.message)
+        }
+    }
+  }
+
+  fun deleteOsBackups() {
+    val cur = _osSignState.value
+    val manifest = cur.activeBackupManifest ?: return
+    if (cur.isRunning) return
+    viewModelScope.launch {
+      _osSignState.value = cur.copy(isRunning = true, errorMessage = null, statusMessage = null)
+      runCatching { coordinator.deleteBackups(manifest, cur.activeBackupViaRoot) }
+        .onSuccess { (count, errors) ->
+          _osSignState.value =
+            _osSignState.value.copy(
+              isRunning = false,
+              activeBackupManifest = if (errors.isEmpty()) null else manifest,
+              statusMessage = "Deleted $count .appsign.bak backup file(s).",
+              errorMessage = errors.takeIf { it.isNotEmpty() }?.joinToString("\n"),
+            )
+        }
+        .onFailure { err ->
+          _osSignState.value = _osSignState.value.copy(isRunning = false, errorMessage = err.message)
+        }
+    }
   }
 
   // --- HISTORY ---

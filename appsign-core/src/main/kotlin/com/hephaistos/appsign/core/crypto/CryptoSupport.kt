@@ -6,6 +6,7 @@ import com.hephaistos.appsign.core.model.CertificateDetails
 import com.hephaistos.appsign.core.model.CertificateFingerprint
 import com.hephaistos.appsign.core.model.CreateAskOptions
 import com.hephaistos.appsign.core.model.KeyAlgorithm
+import com.hephaistos.appsign.core.model.ExactKeySpec
 import java.io.ByteArrayInputStream
 import java.math.BigInteger
 import java.security.KeyFactory
@@ -68,6 +69,27 @@ object CryptoSupport {
       sha1 = digestHex(encoded, "SHA-1", colonSeparated = true),
       md5 = digestHex(encoded, "MD5", colonSeparated = true),
     )
+  }
+
+  fun encodeCertHexDer(cert: X509Certificate, uppercase: Boolean = false): String {
+    val fmt = if (uppercase) "%02X" else "%02x"
+    return cert.encoded.joinToString("") { fmt.format(it) }
+  }
+
+  fun encodeCertBase64Der(cert: X509Certificate): String =
+    Base64.getEncoder().encodeToString(cert.encoded)
+
+  fun tryParseCertificateHex(hex: String): X509Certificate? {
+    val clean = hex.trim()
+    if (clean.length < 40 || clean.length % 2 != 0 || !clean.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) {
+      return null
+    }
+    return runCatching {
+      val bytes = ByteArray(clean.length / 2) { idx ->
+        clean.substring(idx * 2, idx * 2 + 2).toInt(16).toByte()
+      }
+      parseX509Certificate(bytes)
+    }.getOrNull()
   }
 
   fun toPem(type: String, derBytes: ByteArray): String {
@@ -182,36 +204,109 @@ object CryptoSupport {
       else -> pubKey.encoded.size * 8
     }
 
+  fun resolveEcCurveName(pubKey: PublicKey): String? {
+    if (pubKey !is ECPublicKey) return null
+    val bits = pubKey.params.curve.field.fieldSize
+    return when (bits) {
+      256 -> "secp256r1"
+      384 -> "secp384r1"
+      521 -> "secp521r1"
+      else -> "secp256r1"
+    }
+  }
+
+  fun extractExactKeySpec(cert: X509Certificate): ExactKeySpec {
+    val pub = cert.publicKey
+    val rawAlg = pub.algorithm.uppercase()
+    val bits = resolvePublicKeyBits(pub)
+    val ecCurve = resolveEcCurveName(pub)
+    val normalizedAlg =
+      when {
+        rawAlg.contains("EC") -> "EC"
+        rawAlg.contains("DSA") && !rawAlg.contains("EC") -> "DSA"
+        else -> "RSA"
+      }
+    val safeSigAlg =
+      cert.sigAlgName.takeIf { it.isNotBlank() && !it.equals("UNKNOWN", ignoreCase = true) }
+        ?: when (normalizedAlg) {
+          "EC" -> if (bits >= 512) "SHA512withECDSA" else if (bits >= 384) "SHA384withECDSA" else "SHA256withECDSA"
+          "DSA" -> "SHA256withDSA"
+          else -> if (bits >= 4096) "SHA512withRSA" else "SHA256withRSA"
+        }
+    return ExactKeySpec(
+      keyAlgorithm = normalizedAlg,
+      keySizeBits = bits,
+      sigAlgName = safeSigAlg,
+      ecCurveName = ecCurve,
+    )
+  }
+
   fun generateKeyPairAndSelfSignedCert(options: CreateAskOptions): Pair<KeyPair, X509Certificate> {
     val alg = options.algorithm
+    val spec =
+      ExactKeySpec(
+        keyAlgorithm = alg.keyAlg,
+        keySizeBits = alg.keySizeBits,
+        sigAlgName = alg.sigAlg,
+        ecCurveName =
+          when (alg) {
+            KeyAlgorithm.EC_P256 -> "secp256r1"
+            KeyAlgorithm.EC_P384 -> "secp384r1"
+            KeyAlgorithm.EC_P521 -> "secp521r1"
+            else -> null
+          },
+      )
+    return generateKeyPairAndCertFromSpec(
+      spec = spec,
+      subjectDn = options.buildSubjectDn(),
+      issuerDn = options.buildSubjectDn(),
+      validityDays = options.validityYears.toLong().coerceIn(1L, 100L) * 365L,
+    )
+  }
+
+  fun generateKeyPairAndCertFromSpec(
+    spec: ExactKeySpec,
+    subjectDn: String,
+    issuerDn: String = subjectDn,
+    validityDays: Long = 365L * 25L,
+    serialNumber: BigInteger? = null,
+  ): Pair<KeyPair, X509Certificate> {
+    val algUpper = spec.keyAlgorithm.uppercase()
     val keyPairGen =
-      when (alg) {
-        KeyAlgorithm.RSA_2048,
-        KeyAlgorithm.RSA_3072,
-        KeyAlgorithm.RSA_4096 -> {
-          KeyPairGenerator.getInstance("RSA").apply { initialize(alg.keySizeBits, secureRandom) }
-        }
-        KeyAlgorithm.EC_P256 -> {
-          KeyPairGenerator.getInstance("EC").apply {
-            initialize(ECGenParameterSpec("secp256r1"), secureRandom)
+      when (algUpper) {
+        "EC", "ECDSA" -> {
+          val curve =
+            spec.ecCurveName
+              ?: when {
+                spec.keySizeBits >= 512 -> "secp521r1"
+                spec.keySizeBits >= 384 -> "secp384r1"
+                else -> "secp256r1"
+              }
+          KeyPairGenerator.getInstance("EC", bcProvider).apply {
+            initialize(ECGenParameterSpec(curve), secureRandom)
           }
         }
-        KeyAlgorithm.EC_P384 -> {
-          KeyPairGenerator.getInstance("EC").apply {
-            initialize(ECGenParameterSpec("secp384r1"), secureRandom)
-          }
+        "DSA" -> {
+          val size = spec.keySizeBits.coerceIn(1024, 3072)
+          KeyPairGenerator.getInstance("DSA", bcProvider).apply { initialize(size, secureRandom) }
+        }
+        else -> {
+          val size = spec.keySizeBits.coerceAtLeast(1024)
+          KeyPairGenerator.getInstance("RSA").apply { initialize(size, secureRandom) }
         }
       }
     val keyPair = keyPairGen.generateKeyPair()
     val now = Instant.now()
     val notBefore = Date.from(now.minusSeconds(60))
-    val notAfter = Date.from(now.atOffset(ZoneOffset.UTC).plusYears(options.validityYears.toLong().coerceIn(1L, 100L)).toInstant())
-    val serial = BigInteger(128, secureRandom).abs().max(BigInteger.ONE)
-    val subject = X500Name(options.buildSubjectDn())
+    val days = validityDays.coerceIn(1L, 36500L)
+    val notAfter = Date.from(now.plusSeconds(days * 86400L))
+    val serial = serialNumber ?: BigInteger(128, secureRandom).abs().max(BigInteger.ONE)
+    val subject = runCatching { X500Name(subjectDn) }.getOrElse { X500Name("CN=APPSIGN") }
+    val issuer = runCatching { X500Name(issuerDn) }.getOrElse { subject }
 
     val builder =
       JcaX509v3CertificateBuilder(
-        subject,
+        issuer,
         serial,
         notBefore,
         notAfter,
@@ -227,8 +322,19 @@ object CryptoSupport {
       KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment),
     )
 
-    val contentSigner = JcaContentSignerBuilder(alg.sigAlg).setProvider(bcProvider).build(keyPair.private)
-    val certHolder = builder.build(contentSigner)
+    val chosenSigAlg =
+      runCatching {
+        JcaContentSignerBuilder(spec.sigAlgName).setProvider(bcProvider).build(keyPair.private)
+      }.getOrElse {
+        val fallbackAlg =
+          when (algUpper) {
+            "EC", "ECDSA" -> "SHA256withECDSA"
+            "DSA" -> "SHA256withDSA"
+            else -> "SHA256withRSA"
+          }
+        JcaContentSignerBuilder(fallbackAlg).setProvider(bcProvider).build(keyPair.private)
+      }
+    val certHolder = builder.build(chosenSigAlg)
     val cert = JcaX509CertificateConverter().setProvider(bcProvider).getCertificate(certHolder)
     cert.verify(keyPair.public)
     return keyPair to cert

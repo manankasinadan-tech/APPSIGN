@@ -31,6 +31,16 @@ APPSIGN is structured into three independent Gradle modules sharing a single pur
 - Selectable signature schemes (`v1`, `v2`, `v3`, `v3.1`, `v4`) and selectable output folder (`/sdcard` or Android SAF folder).
 - **Mandatory automatic post-sign verification** runs `ApkVerifierEngine` on every output APK immediately after signing.
 
+### RESIGNPRO
+- Deeply profiles a target APK's cryptographic configuration (`v1`/`v2`/`v3`/`v3.1`/`v4`, `minSdkVersion`, zipalign state, RSA/EC/DSA key sizes and curves, signature algorithms, validity periods, multi-signers, and v3 key rotation lineage).
+- User supplies only the new X.509 cryptographic identity (with optional `ASK-LOCKED` passphrase; defaults to `ASK-OPEN`).
+- Automatically generates matching `.ask` container(s), signs while preserving original APKs, and runs automatic post-sign verification.
+
+### OS Sign (Unpacked GSI / Partition Signer)
+- Dynamic filesystem verification and in-place resigning for unpacked Android partitions/GSIs (`.apk`, `.apex`, `.capex`, signed `.jar`) with optional full-device Root (`su`) folder browser (`/`, `/data/local`, `/data/data`, `/sdcard`).
+- **Strict symlink safety**: never follows, modifies, backs up, or deletes symbolic links.
+- Groups signed artifacts by shared SHA-256 certificate, maps certificate references dynamically across XML/permission/config files (`mac_permissions.xml`, hex DER, PEM, DER, SHA-256/SHA-1), preserves unsigned JARs (such as `framework.jar`), and supports `.appsign.bak` backups with 1-click **Restore** and **Delete .bak**.
+
 ---
 
 ## 3. APPSIGN Key Format (`.ask` v1)
@@ -86,6 +96,15 @@ appsign resign application.apk --key mykey.ask --pass secret
 
 # Batch resign with JKS keystore and custom output directory
 appsign resign *.apk --keystore mykey.jks --pass storepass --output signed/
+
+# RESIGNPRO: clone target crypto specs with a new identity and save .ask key
+appsign resign-pro target.apk --cn "Custom Dev" --org "Org" --ask-out custom_pro.ask
+
+# OS Sign: inspect unpacked GSI/partition, resign in-place, restore or clean .bak
+appsign os-sign verify /path/to/unpacked_partition
+appsign os-sign resign /path/to/unpacked_partition --strategy identities --cn "Custom OS"
+appsign os-sign restore /path/to/unpacked_partition/appsign-backup-manifest.json
+appsign os-sign clean-bak /path/to/unpacked_partition/appsign-backup-manifest.json
 
 # Manage ASK keys
 appsign key create --alias release --alg rsa2048 --open --out release.ask

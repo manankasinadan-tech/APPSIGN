@@ -7,10 +7,12 @@ import com.hephaistos.appsign.core.model.AskInspectResult
 import com.hephaistos.appsign.core.model.AskMode
 import com.hephaistos.appsign.core.model.AskPrivateKeyPayload
 import com.hephaistos.appsign.core.model.CreateAskOptions
+import com.hephaistos.appsign.core.model.ExactKeySpec
 import com.hephaistos.appsign.core.model.UnlockedKeyMaterial
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.math.BigInteger
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
@@ -51,6 +53,36 @@ object AskKeyManager {
       chain = listOf(cert),
       passphrase = options.passphrase,
       notes = options.notes,
+    )
+  }
+
+  fun createAskFromExactSpec(
+    alias: String,
+    spec: ExactKeySpec,
+    subjectDn: String,
+    issuerDn: String = subjectDn,
+    validityDays: Long = 365L * 25L,
+    serialNumber: BigInteger? = null,
+    passphrase: CharArray? = null,
+    notes: String = "",
+  ): AskContainer {
+    if (alias.isBlank()) {
+      throw AskFormatException("Key alias cannot be blank.")
+    }
+    val (keyPair, cert) =
+      CryptoSupport.generateKeyPairAndCertFromSpec(
+        spec = spec,
+        subjectDn = subjectDn,
+        issuerDn = issuerDn,
+        validityDays = validityDays,
+        serialNumber = serialNumber,
+      )
+    return buildContainerFromMaterial(
+      alias = alias.trim(),
+      privateKey = keyPair.private,
+      chain = listOf(cert),
+      passphrase = passphrase,
+      notes = notes,
     )
   }
 
