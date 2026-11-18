@@ -18,6 +18,7 @@ import com.hephaistos.appsign.core.model.UnlockedKeyMaterial
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
@@ -76,7 +77,7 @@ class SettingsRepository(private val context: Context) {
         alignBeforeSign = prefs[Keys.ALIGN] ?: true,
         rootAccessEnabled = prefs[Keys.ROOT_ENABLED] ?: false,
       )
-    }
+    }.catch { emit(AppSettings()) }
 
   suspend fun updateTheme(theme: ThemePreference) {
     context.appsignDataStore.edit { it[Keys.THEME] = theme.name }
@@ -117,7 +118,8 @@ class SettingsRepository(private val context: Context) {
 }
 
 class HistoryRepository(private val dao: OperationHistoryDao) {
-  val historyFlow: Flow<List<OperationHistoryEntity>> = dao.observeAll()
+  val historyFlow: Flow<List<OperationHistoryEntity>> =
+    dao.observeAll().catch { emit(emptyList()) }
 
   suspend fun logOperation(
     operationType: String,
@@ -127,25 +129,29 @@ class HistoryRepository(private val dao: OperationHistoryDao) {
     detailsSummary: String,
     reportJson: String = "",
   ) {
-    dao.insert(
-      OperationHistoryEntity(
-        operationType = operationType,
-        fileNames = fileNames,
-        keyAlias = keyAlias,
-        status = status,
-        detailsSummary = detailsSummary,
-        reportJson = reportJson,
+    val safeReport = if (reportJson.length <= 16_384) reportJson else ""
+    runCatching {
+      dao.insert(
+        OperationHistoryEntity(
+          operationType = operationType.take(64),
+          fileNames = fileNames.take(512),
+          keyAlias = keyAlias?.take(256),
+          status = status.take(32),
+          detailsSummary = detailsSummary.take(1024),
+          reportJson = safeReport,
+        )
       )
-    )
+    }
   }
 
-  suspend fun delete(id: Long) = dao.deleteById(id)
+  suspend fun delete(id: Long) = runCatching { dao.deleteById(id) }
 
-  suspend fun clearAll() = dao.clearAll()
+  suspend fun clearAll() = runCatching { dao.clearAll() }
 }
 
 class KeyRegistryRepository(private val context: Context, private val dao: ManagedKeyDao) {
-  val keysFlow: Flow<List<ManagedKeyEntity>> = dao.observeAll()
+  val keysFlow: Flow<List<ManagedKeyEntity>> =
+    dao.observeAll().catch { emit(emptyList()) }
 
   private val keystoreDir: File
     get() = File(context.filesDir, "appsign_keys").apply { mkdirs() }

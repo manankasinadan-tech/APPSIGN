@@ -34,14 +34,27 @@ object RootBridge {
   @Volatile
   private var resolvedMode: RootNamespaceMode? = null
 
-  private fun buildSuProcessBuilder(mode: RootNamespaceMode, script: String): ProcessBuilder {
+  private fun buildSuProcessBuilder(mode: RootNamespaceMode): ProcessBuilder {
     return when (mode) {
-      RootNamespaceMode.MOUNT_MASTER_LONG -> ProcessBuilder("su", "--mount-master", "-c", script)
-      RootNamespaceMode.MOUNT_MASTER_SHORT -> ProcessBuilder("su", "-mm", "-c", script)
-      RootNamespaceMode.NSENTER_PID1 ->
-        ProcessBuilder("su", "-c", "nsenter -t 1 -m -- sh -c ${shellQuote(script)}")
-      RootNamespaceMode.PLAIN -> ProcessBuilder("su", "-c", script)
+      RootNamespaceMode.MOUNT_MASTER_LONG -> ProcessBuilder("su", "--mount-master", "-c", "sh -s")
+      RootNamespaceMode.MOUNT_MASTER_SHORT -> ProcessBuilder("su", "-mm", "-c", "sh -s")
+      RootNamespaceMode.NSENTER_PID1 -> ProcessBuilder("su", "-c", "nsenter -t 1 -m -- sh -s")
+      RootNamespaceMode.PLAIN -> ProcessBuilder("su", "-c", "sh -s")
     }
+  }
+
+  private fun startModeProcess(mode: RootNamespaceMode, script: String): Process {
+    val process = buildSuProcessBuilder(mode).redirectErrorStream(true).start()
+    runCatching {
+      process.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
+        writer.write(script)
+        writer.newLine()
+        writer.write("exit")
+        writer.newLine()
+        writer.flush()
+      }
+    }
+    return process
   }
 
   private fun ensureRootNamespaceMode(): RootNamespaceMode {
@@ -58,7 +71,7 @@ object RootBridge {
     )) {
       val run =
         runCatching {
-          val p = buildSuProcessBuilder(candidate, testScript).redirectErrorStream(true).start()
+          val p = startModeProcess(candidate, testScript)
           if (!p.waitFor(4, TimeUnit.SECONDS)) {
             p.destroyForcibly()
             return@runCatching null
@@ -83,7 +96,7 @@ object RootBridge {
 
   private fun startRootScript(script: String): Process {
     val mode = ensureRootNamespaceMode()
-    return buildSuProcessBuilder(mode, script).redirectErrorStream(true).start()
+    return startModeProcess(mode, script)
   }
 
   suspend fun probeRootAccess(): RootProbeResult =

@@ -195,7 +195,7 @@ class OsSignAndProCoordinator(
       status = "SUCCESS",
       detailsSummary =
         "Signed=${normalizedReport.signedArtifactsCount}, Preserved=${normalizedReport.preservedUnsignedCount}, SymlinksIgnored=${normalizedReport.symlinksIgnoredCount}",
-      reportJson = ReportFormatters.osSignInspectionToJson(normalizedReport),
+      reportJson = ReportFormatters.osSignInspectionToText(normalizedReport).take(8_192),
     )
     return normalizedReport
   }
@@ -296,7 +296,7 @@ class OsSignAndProCoordinator(
       status = if (finalReport.totalFailed == 0) "SUCCESS" else "WARNING",
       detailsSummary =
         "Succeeded=${finalReport.totalSucceeded}/${finalReport.totalResigned}, Refs=${finalReport.totalReferencesUpdated}, SymlinksIgnored=${finalReport.symlinksIgnoredCount}",
-      reportJson = ReportFormatters.osSignResignToJson(finalReport),
+      reportJson = ReportFormatters.osSignResignToText(finalReport).take(8_192),
     )
     return finalReport
   }

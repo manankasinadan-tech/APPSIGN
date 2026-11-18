@@ -540,7 +540,7 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
       Spacer(Modifier.height(6.dp))
       HorizontalDivider()
       Spacer(Modifier.height(8.dp))
-      grp.artifacts.forEach { art ->
+      grp.artifacts.take(150).forEach { art ->
         Row(
           modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
           verticalAlignment = Alignment.CenterVertically,
@@ -579,13 +579,21 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
           }
         }
       }
+      if (grp.artifacts.size > 150) {
+        Text(
+          text = "... +${grp.artifacts.size - 150} more artifacts",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.padding(top = 4.dp),
+        )
+      }
       if (grp.permissionReferences.isNotEmpty()) {
         Spacer(Modifier.height(8.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(Modifier.height(6.dp))
         Text(strings.osPermRefsTitle, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         Spacer(Modifier.height(4.dp))
-        grp.permissionReferences.forEach { ref ->
+        grp.permissionReferences.take(150).forEach { ref ->
           Text(
             text = "• ${ref.relativePath} [${ref.format.name} ×${ref.occurrences}]",
             style = MaterialTheme.typography.labelSmall,
@@ -601,6 +609,13 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
             )
           }
         }
+        if (grp.permissionReferences.size > 150) {
+          Text(
+            text = "... +${grp.permissionReferences.size - 150} more refs",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+          )
+        }
       }
     }
     Spacer(Modifier.height(8.dp))
@@ -611,7 +626,7 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
       title = "${strings.osPermMapTitle} (${report.allPermissionReferences.size})",
       subtitle = report.allPermissionReferences.map { it.relativePath }.distinct().size.let { "$it file(s)" },
     ) {
-      report.allPermissionReferences.forEach { ref ->
+      report.allPermissionReferences.take(150).forEach { ref ->
         Text(
           text = "• ${ref.relativePath} [${ref.format.name} ×${ref.occurrences}] → ${ref.matchedSignerSha256.take(14)}...",
           style = MaterialTheme.typography.labelSmall,
@@ -626,6 +641,14 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
           )
         }
       }
+      if (report.allPermissionReferences.size > 150) {
+        Text(
+          text = "... +${report.allPermissionReferences.size - 150} more refs",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.padding(top = 4.dp),
+        )
+      }
     }
     Spacer(Modifier.height(8.dp))
   }
@@ -635,8 +658,16 @@ private fun OsInspectionDashboard(report: OsSignInspectionReport) {
       title = "${strings.osPreservedTitle} (${report.preservedArtifacts.size})",
       subtitle = "Untouched by RESIGNER",
     ) {
-      report.preservedArtifacts.forEach { art ->
+      report.preservedArtifacts.take(150).forEach { art ->
         Text("• ${art.relativePath} — ${art.reason}", style = MaterialTheme.typography.labelSmall)
+      }
+      if (report.preservedArtifacts.size > 150) {
+        Text(
+          text = "... +${report.preservedArtifacts.size - 150} more preserved",
+          style = MaterialTheme.typography.labelSmall,
+          color = MaterialTheme.colorScheme.primary,
+          modifier = Modifier.padding(top = 4.dp),
+        )
       }
     }
   }

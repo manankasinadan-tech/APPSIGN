@@ -10,6 +10,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "operation_history")
@@ -39,7 +40,18 @@ data class ManagedKeyEntity(
 
 @Dao
 interface OperationHistoryDao {
-  @Query("SELECT * FROM operation_history ORDER BY timestampMs DESC")
+  @Query(
+    """
+    SELECT id, timestampMs, operationType,
+      SUBSTR(fileNames, 1, 512) AS fileNames,
+      keyAlias, status,
+      SUBSTR(detailsSummary, 1, 1024) AS detailsSummary,
+      CASE WHEN LENGTH(reportJson) > 16384 THEN '' ELSE reportJson END AS reportJson
+    FROM operation_history
+    ORDER BY timestampMs DESC
+    LIMIT 200
+    """
+  )
   fun observeAll(): Flow<List<OperationHistoryEntity>>
 
   @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -87,6 +99,19 @@ abstract class AppsignDatabase : RoomDatabase() {
                 context.applicationContext,
                 AppsignDatabase::class.java,
                 "appsign_local.db",
+              )
+              .addCallback(
+                object : Callback() {
+                  override fun onOpen(db: SupportSQLiteDatabase) {
+                    super.onOpen(db)
+                    runCatching {
+                      // Heal any pre-existing oversized history blobs that exceed Android's 2MB CursorWindow limit
+                      db.execSQL("UPDATE operation_history SET reportJson = '' WHERE LENGTH(reportJson) > 16384")
+                      db.execSQL("UPDATE operation_history SET detailsSummary = SUBSTR(detailsSummary, 1, 1024) WHERE LENGTH(detailsSummary) > 1024")
+                      db.execSQL("UPDATE operation_history SET fileNames = SUBSTR(fileNames, 1, 512) WHERE LENGTH(fileNames) > 512")
+                    }
+                  }
+                }
               )
               .build()
               .also { instance = it }

@@ -11,6 +11,9 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.test.core.app.ApplicationProvider
+import com.hephaistos.appsign.android.data.local.AppsignDatabase
+import com.hephaistos.appsign.android.data.local.OperationHistoryEntity
+import com.hephaistos.appsign.android.data.repository.HistoryRepository
 import com.hephaistos.appsign.core.apk.ApkSignerEngine
 import com.hephaistos.appsign.core.ask.AskKeyManager
 import com.hephaistos.appsign.core.crypto.CryptoSupport
@@ -23,6 +26,8 @@ import java.io.FileOutputStream
 import java.nio.file.Files
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -193,5 +198,42 @@ class ExampleRobolectricTest {
     } finally {
       tmpDir.deleteRecursively()
     }
+  }
+
+  @Test
+  fun `oversized history row over 2MB is safely truncated and never crashes startup or observeAll`() = runBlocking {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val db = AppsignDatabase.getInstance(context)
+    val dao = db.historyDao()
+    val repo = HistoryRepository(dao)
+
+    // Simulate a legacy >2.5MB OS_VERIFY row inserted directly into SQLite
+    val hugeBlob = "X".repeat(2_600_000)
+    dao.insert(
+      OperationHistoryEntity(
+        operationType = "OS_VERIFY",
+        fileNames = "ROM",
+        keyAlias = "12 groups",
+        status = "SUCCESS",
+        detailsSummary = "Signed=250",
+        reportJson = hugeBlob,
+      )
+    )
+
+    // observeAll + historyFlow must safely return without SQLiteBlobTooBigException
+    val rows = repo.historyFlow.first()
+    assertTrue(rows.any { it.operationType == "OS_VERIFY" && it.reportJson.isEmpty() })
+
+    // Subsequent logOperation with >32KB reportJson also drops the oversized blob cleanly
+    repo.logOperation(
+      operationType = "OS_VERIFY",
+      fileNames = "ROM2",
+      keyAlias = "8 groups",
+      status = "SUCCESS",
+      detailsSummary = "Signed=120",
+      reportJson = hugeBlob,
+    )
+    val updated = repo.historyFlow.first()
+    assertTrue(updated.any { it.fileNames == "ROM2" && it.reportJson.isEmpty() })
   }
 }
